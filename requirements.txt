@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+langchain
+langchain-google-genai
+google-generativeai
+sqlalchemy
+alembic
+psycopg2-binary
+python-dotenv
+pytz
