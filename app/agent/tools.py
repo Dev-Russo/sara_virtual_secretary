@@ -43,7 +43,8 @@ def save_task(title: str, due_date: str = None, priority: str = "medium") -> str
         return f"Tarefa '{title}' salva com sucesso{prazo}!"
     except Exception as e:
         db.rollback()
-        return f"Erro ao salvar tarefa: {str(e)}"
+        print(f"[ERRO save_task] {str(e)}")  
+        return f"Erro ao salvar tarefa: {str(e)}"  
     finally:
         db.close()
 
@@ -68,7 +69,8 @@ def create_reminder(message: str, remind_at: str) -> str:
         return f"Lembrete criado para {parsed_date.strftime('%d/%m/%Y às %H:%M')}: '{message}'"
     except Exception as e:
         db.rollback()
-        return f"Erro ao criar lembrete: {str(e)}"
+        print(f"[ERRO save_task] {str(e)}")  
+        return f"Erro ao salvar tarefa: {str(e)}"  
     finally:
         db.close()
 
@@ -107,7 +109,9 @@ def list_tasks(filter_date: str = None) -> str:
 
         return resultado
     except Exception as e:
-        return f"Erro ao listar tarefas: {str(e)}"
+        db.rollback()
+        print(f"[ERRO save_task] {str(e)}") 
+        return f"Erro ao salvar tarefa: {str(e)}"  
     finally:
         db.close()
 
@@ -134,6 +138,7 @@ def complete_task(title: str) -> str:
         return f"Tarefa '{task.title}' marcada como concluída! ✅"
     except Exception as e:
         db.rollback()
-        return f"Erro ao concluir tarefa: {str(e)}"
+        print(f"[ERRO save_task] {str(e)}") 
+        return f"Erro ao salvar tarefa: {str(e)}" 
     finally:
         db.close()
