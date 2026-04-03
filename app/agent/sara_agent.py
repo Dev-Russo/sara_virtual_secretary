@@ -1,127 +1,113 @@
+"""
+Agente principal da Sara.
+
+Responsável por:
+- Montar o contexto de cada conversa (histórico + mensagem atual)
+- Fazer as chamadas à API do Groq
+- Executar as tools quando o modelo solicitar
+- Salvar o histórico de conversa no banco
+
+Fluxo de uma mensagem:
+    1. Carrega histórico do banco
+    2. Monta lista de mensagens [system + histórico + mensagem atual]
+    3. Primeira chamada ao Groq — modelo decide: responder ou usar tool
+    4. Se usar tool: executa a função Python, adiciona resultado às mensagens
+    5. Segunda chamada ao Groq — modelo formula resposta final
+    6. Salva a troca no histórico e retorna a resposta
+"""
+
+import json
 from groq import Groq
-from app.agent.tools import save_task, create_reminder, list_tasks, complete_task
+from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA
 from app.agent.prompts import get_system_prompt
 from app.db.database import SessionLocal
 from app.models.conversation import ConversationHistory
-from dotenv import load_dotenv
-import json, os
+from app.config import (
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GROQ_TEMPERATURE,
+    GROQ_MAX_TOKENS,
+    USER_ID,
+    HISTORICO_LIMITE,
+)
 
-load_dotenv()
+groq_client = Groq(api_key=GROQ_API_KEY)
 
-USER_ID = os.getenv("USER_ID", "5511999999999")
-
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-# Mapa de tools disponíveis
-TOOLS_MAP = {
-    "save_task": save_task,
-    "create_reminder": create_reminder,
-    "list_tasks": list_tasks,
-    "complete_task": complete_task,
-}
-
-# Definição das tools no formato que o Groq entende
-TOOLS_SCHEMA = [
-    {
-        "type": "function",
-        "function": {
-            "name": "save_task",
-            "description": "Salva uma nova tarefa. Use quando o usuário mencionar algo que precisa fazer, uma obrigação ou compromisso.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Título da tarefa"},
-                    "due_date": {"type": "string", "description": "Data no formato YYYY-MM-DD HH:MM ou null"},
-                    "priority": {"type": "string", "enum": ["low", "medium", "high"], "description": "Prioridade da tarefa"}
-                },
-                "required": ["title"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_reminder",
-            "description": "Cria um lembrete para um horário específico. Use quando o usuário pedir para ser lembrado de algo.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string", "description": "Texto do lembrete"},
-                    "remind_at": {"type": "string", "description": "Data e hora no formato YYYY-MM-DD HH:MM"}
-                },
-                "required": ["message", "remind_at"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_tasks",
-            "description": "Lista tarefas pendentes. Use quando o usuário perguntar o que tem para fazer ou pedir para listar tarefas.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filter_date": {"type": "string", "description": "Filtrar por data no formato YYYY-MM-DD. Opcional."}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "complete_task",
-            "description": "Marca uma tarefa como concluída. Use quando o usuário disser que já fez algo.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Título ou parte do título da tarefa"}
-                },
-                "required": ["title"]
-            }
-        }
-    }
-]
-
-def carregar_historico(user_id: str, limite: int = 10):
+def carregar_historico(user_id: str) -> list[dict]:
     db = SessionLocal()
     try:
-        registros = db.query(ConversationHistory).filter(
-            ConversationHistory.user_id == user_id
-        ).order_by(ConversationHistory.created_at.desc()).limit(limite).all()
+        registros = (
+            db.query(ConversationHistory)
+            .filter(ConversationHistory.user_id == user_id)
+            .order_by(ConversationHistory.created_at.desc())
+            .limit(HISTORICO_LIMITE)
+            .all()
+        )
+
+        # Invertemos para ter ordem cronológica (mais antigas primeiro)
         registros.reverse()
-        return [{"role": r.role, "content": str(r.content)} for r in registros]
+
+        return [
+            {"role": r.role, "content": str(r.content)}
+            for r in registros
+            if r.role in ("user", "assistant") 
+        ]
+
     except Exception as e:
         print(f"[ERRO carregar_historico] {e}")
-        return []
+        return []  # retorna vazio em caso de erro — melhor do que quebrar
     finally:
         db.close()
 
-def salvar_historico(user_id: str, role: str, content: str):
+
+def salvar_historico(user_id: str, role: str, content: str) -> None:
     db = SessionLocal()
     try:
-        registro = ConversationHistory(user_id=user_id, role=role, content=content)
+        registro = ConversationHistory(
+            user_id=user_id,
+            role=role,
+            content=content
+        )
         db.add(registro)
         db.commit()
+
     except Exception as e:
         print(f"[ERRO salvar_historico] {e}")
         db.rollback()
     finally:
         db.close()
 
+
+# ============================================================
+# EXECUÇÃO DE TOOLS
+# ============================================================
+
 def executar_tool(nome: str, argumentos: dict) -> str:
-    tool_fn = TOOLS_MAP.get(nome)
-    if not tool_fn:
+    funcao = TOOLS_MAP.get(nome)
+
+    if not funcao:
         return f"Tool '{nome}' não encontrada."
+
+    # Garante que argumentos nunca seja None — funções Python não aceitam None como **kwargs
+    argumentos = argumentos or {}
+
     try:
-        return tool_fn.invoke(argumentos)
+        return funcao(**argumentos)
     except Exception as e:
-        print(f"[ERRO tool {nome}] {e}")
+        print(f"[ERRO executar_tool '{nome}'] {e}")
         return f"Erro ao executar {nome}: {str(e)}"
 
+
+# ============================================================
+# CICLO PRINCIPAL DO AGENTE
+# ============================================================
+
 def chat(mensagem: str) -> str:
+    # Carrega as últimas N mensagens para dar contexto ao modelo
     historico = carregar_historico(USER_ID)
 
+    # Monta a lista de mensagens no formato da API:
+    # [system_prompt] + [histórico] + [mensagem atual]
     messages = [
         {"role": "system", "content": get_system_prompt(USER_ID)},
         *historico,
@@ -129,55 +115,85 @@ def chat(mensagem: str) -> str:
     ]
 
     try:
-        # Primeira chamada — modelo decide se usa tool ou responde direto
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+        # ----------------------------------------
+        # PRIMEIRA CHAMADA — o modelo decide o que fazer
+        # tool_choice="auto" significa que o modelo escolhe
+        # sozinho se vai usar uma tool ou responder direto
+        # ----------------------------------------
+        resposta_inicial = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
             messages=messages,
             tools=TOOLS_SCHEMA,
             tool_choice="auto",
-            temperature=0.3,
-            max_tokens=1024
+            temperature=GROQ_TEMPERATURE,
+            max_tokens=GROQ_MAX_TOKENS
         )
 
-        msg = response.choices[0].message
+        msg = resposta_inicial.choices[0].message
 
-        # Se o modelo quer chamar uma tool
+        # ----------------------------------------
+        # CAMINHO 1 — modelo quer usar uma ou mais tools
+        # ----------------------------------------
         if msg.tool_calls:
-            messages.append({"role": "assistant", "content": msg.content or "", "tool_calls": [
-                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in msg.tool_calls
-            ]})
 
-            # Executa cada tool e adiciona o resultado
+            # Adiciona a decisão do modelo ao histórico da conversa
+            # (necessário para a segunda chamada entender o contexto)
+            messages.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    }
+                    for tc in msg.tool_calls
+                ]
+            })
+
+            # Executa cada tool solicitada e adiciona o resultado
             for tool_call in msg.tool_calls:
                 nome = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
-                print(f"[Tool chamada] {nome}({args})")
-                resultado = executar_tool(nome, args)
+                argumentos = json.loads(tool_call.function.arguments)
+
+                print(f"[Tool] {nome}({argumentos})")
+                resultado = executar_tool(nome, argumentos)
+
+                # O resultado da tool entra como mensagem de role "tool"
+                # O modelo vai ler isso na segunda chamada
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": resultado
                 })
 
-            # Segunda chamada — modelo formula resposta final com o resultado da tool
-            response2 = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+            # ----------------------------------------
+            # SEGUNDA CHAMADA — modelo formula resposta
+            # com base nos resultados das tools
+            # ----------------------------------------
+            resposta_final = groq_client.chat.completions.create(
+                model=GROQ_MODEL,
                 messages=messages,
-                temperature=0.3,
-                max_tokens=1024
+                temperature=GROQ_TEMPERATURE,
+                max_tokens=GROQ_MAX_TOKENS
             )
-            resposta = response2.choices[0].message.content
+            resposta = resposta_final.choices[0].message.content
 
+        # ----------------------------------------
+        # CAMINHO 2 — modelo respondeu direto, sem tools
+        # ----------------------------------------
         else:
-            # Modelo respondeu direto sem usar tool
             resposta = msg.content
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        resposta = f"Desculpe, tive um problema. Tente novamente. ({str(e)})"
+        resposta = f"Desculpe, tive um problema ao processar sua mensagem. Tente novamente. ({str(e)})"
 
+    # Salva a troca no banco independente do caminho tomado
     salvar_historico(USER_ID, "user", mensagem)
     salvar_historico(USER_ID, "assistant", resposta)
 
