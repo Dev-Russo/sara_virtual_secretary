@@ -14,7 +14,6 @@ from datetime import datetime
 from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.reminder import Reminder
-from app.config import USER_ID
 
 
 # ============================================================
@@ -26,12 +25,13 @@ from app.config import USER_ID
 #   - nunca levanta exceções — erros viram strings descritivas
 # ============================================================
 
-def save_task(title: str, due_date: str = None, priority: str = "medium") -> str:
+def save_task(title: str, user_id: str, due_date: str = None, priority: str = "medium") -> str:
     """
     Salva uma nova tarefa no banco de dados.
 
     Args:
         title: Título ou descrição da tarefa.
+        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
         due_date: Data/hora no formato 'YYYY-MM-DD HH:MM'. Opcional.
         priority: Prioridade da tarefa — 'low', 'medium' ou 'high'.
 
@@ -52,7 +52,7 @@ def save_task(title: str, due_date: str = None, priority: str = "medium") -> str
                     continue
 
         task = Task(
-            user_id=USER_ID,
+            user_id=user_id,
             title=title,
             due_date=parsed_date,
             priority=priority,
@@ -73,12 +73,13 @@ def save_task(title: str, due_date: str = None, priority: str = "medium") -> str
         db.close()
 
 
-def create_reminder(message: str, remind_at: str) -> str:
+def create_reminder(message: str, user_id: str, remind_at: str) -> str:
     """
     Cria um lembrete para ser disparado em um horário específico.
 
     Args:
         message: Texto que será enviado ao usuário no momento do lembrete.
+        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
         remind_at: Data/hora no formato 'YYYY-MM-DD HH:MM'.
 
     Returns:
@@ -89,7 +90,7 @@ def create_reminder(message: str, remind_at: str) -> str:
         parsed_date = datetime.strptime(remind_at.strip(), "%Y-%m-%d %H:%M")
 
         reminder = Reminder(
-            user_id=USER_ID,
+            user_id=user_id,
             message=message,
             remind_at=parsed_date,
             sent=False
@@ -109,11 +110,12 @@ def create_reminder(message: str, remind_at: str) -> str:
         db.close()
 
 
-def list_tasks(filter_date: str = None) -> str:
+def list_tasks(user_id: str, filter_date: str = None) -> str:
     """
     Lista as tarefas pendentes do usuário.
 
     Args:
+        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
         filter_date: Filtra tarefas de uma data específica no formato 'YYYY-MM-DD'. Opcional.
 
     Returns:
@@ -122,7 +124,7 @@ def list_tasks(filter_date: str = None) -> str:
     db = SessionLocal()
     try:
         query = db.query(Task).filter(
-            Task.user_id == USER_ID,
+            Task.user_id == user_id,
             Task.status == "pending"
         )
 
@@ -162,12 +164,13 @@ def list_tasks(filter_date: str = None) -> str:
         db.close()
 
 
-def complete_task(title: str) -> str:
+def complete_task(title: str, user_id: str) -> str:
     """
     Marca uma tarefa como concluída buscando pelo título.
 
     Args:
         title: Título ou trecho do título da tarefa a ser concluída.
+        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
 
     Returns:
         String confirmando a conclusão ou informando que não foi encontrada.
@@ -176,7 +179,7 @@ def complete_task(title: str) -> str:
     try:
         # Busca por correspondência parcial, ignorando maiúsculas/minúsculas
         task = db.query(Task).filter(
-            Task.user_id == USER_ID,
+            Task.user_id == user_id,
             Task.status == "pending",
             Task.title.ilike(f"%{title}%")
         ).first()

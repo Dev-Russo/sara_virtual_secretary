@@ -27,8 +27,6 @@ from app.config import (
     GROQ_MODEL,
     GROQ_TEMPERATURE,
     GROQ_MAX_TOKENS,
-    USER_ID,
-    HISTORICO_LIMITE,
 )
 
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -40,7 +38,7 @@ def carregar_historico(user_id: str) -> list[dict]:
             db.query(ConversationHistory)
             .filter(ConversationHistory.user_id == user_id)
             .order_by(ConversationHistory.created_at.desc())
-            .limit(HISTORICO_LIMITE)
+            .limit(10)
             .all()
         )
 
@@ -50,7 +48,7 @@ def carregar_historico(user_id: str) -> list[dict]:
         return [
             {"role": r.role, "content": str(r.content)}
             for r in registros
-            if r.role in ("user", "assistant") 
+            if r.role in ("user", "assistant")
         ]
 
     except Exception as e:
@@ -82,7 +80,11 @@ def salvar_historico(user_id: str, role: str, content: str) -> None:
 # EXECUÇÃO DE TOOLS
 # ============================================================
 
-def executar_tool(nome: str, argumentos: dict) -> str:
+def executar_tool(nome: str, argumentos: dict, user_id: str) -> str:
+    """
+    Executa uma tool com base no nome fornecido.
+    Injeta automaticamente o user_id em todas as tools.
+    """
     funcao = TOOLS_MAP.get(nome)
 
     if not funcao:
@@ -90,6 +92,9 @@ def executar_tool(nome: str, argumentos: dict) -> str:
 
     # Garante que argumentos nunca seja None — funções Python não aceitam None como **kwargs
     argumentos = argumentos or {}
+    
+    # Injeta user_id automaticamente em todas as tools
+    argumentos["user_id"] = user_id
 
     try:
         return funcao(**argumentos)
@@ -102,14 +107,21 @@ def executar_tool(nome: str, argumentos: dict) -> str:
 # CICLO PRINCIPAL DO AGENTE
 # ============================================================
 
-def chat(mensagem: str) -> str:
+def chat(mensagem: str, user_id: str) -> str:
+    """
+    Processa uma mensagem do usuário e retorna uma resposta.
+    
+    Args:
+        mensagem: Texto da mensagem do usuário.
+        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
+    """
     # Carrega as últimas N mensagens para dar contexto ao modelo
-    historico = carregar_historico(USER_ID)
+    historico = carregar_historico(user_id)
 
     # Monta a lista de mensagens no formato da API:
     # [system_prompt] + [histórico] + [mensagem atual]
     messages = [
-        {"role": "system", "content": get_system_prompt(USER_ID)},
+        {"role": "system", "content": get_system_prompt(user_id)},
         *historico,
         {"role": "user", "content": mensagem}
     ]
@@ -160,7 +172,7 @@ def chat(mensagem: str) -> str:
                 argumentos = json.loads(tool_call.function.arguments)
 
                 print(f"[Tool] {nome}({argumentos})")
-                resultado = executar_tool(nome, argumentos)
+                resultado = executar_tool(nome, argumentos, user_id)
 
                 # O resultado da tool entra como mensagem de role "tool"
                 # O modelo vai ler isso na segunda chamada
@@ -194,7 +206,7 @@ def chat(mensagem: str) -> str:
         resposta = f"Desculpe, tive um problema ao processar sua mensagem. Tente novamente. ({str(e)})"
 
     # Salva a troca no banco independente do caminho tomado
-    salvar_historico(USER_ID, "user", mensagem)
-    salvar_historico(USER_ID, "assistant", resposta)
+    salvar_historico(user_id, "user", mensagem)
+    salvar_historico(user_id, "assistant", resposta)
 
     return resposta

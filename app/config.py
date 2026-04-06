@@ -18,18 +18,14 @@ GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
 # --- Banco de dados ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# --- Usuário ---
-# No MVP o usuário é fixo — na fase do Telegram virá do chat_id
-USER_ID = os.getenv("USER_ID")
-if not USER_ID:
-    raise ValueError(
-        "USER_ID não está configurado no arquivo .env. "
-        "Para o MVP, defina um identificador fixo (ex: USER_ID=user001)"
-    )
+# --- Usuário (Fase 1 — mantido para compatibilidade com CLI) ---
+USER_ID = os.getenv("USER_ID", "5511999999999")
 
 # --- Configurações do agente ---
 TIMEZONE = os.getenv("TIMEZONE", "America/Sao_Paulo")
 HISTORICO_LIMITE = int(os.getenv("HISTORICO_LIMITE", "10"))
 
-# --- Telegram ---
+# --- Telegram (Fase 2) ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BRIEFING_HORA = os.getenv("BRIEFING_HORA", "08:00")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")

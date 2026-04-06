@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(test *)",
-      "Bash(docker ps *)"
+      "Bash(docker ps *)",
+      "Bash(source *)",
+      "Bash(python *)"
     ]
   },
   "$version": 3

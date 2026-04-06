@@ -20,4 +20,7 @@ __pycache__/
 # Alembic
 alembic/versions/
 
+# QWEN
+QWEN.md
+
 
