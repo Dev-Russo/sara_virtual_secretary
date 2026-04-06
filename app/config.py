@@ -20,7 +20,12 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- Usuário ---
 # No MVP o usuário é fixo — na fase do Telegram virá do chat_id
-USER_ID = os.getenv("USER_ID", "")
+USER_ID = os.getenv("USER_ID")
+if not USER_ID:
+    raise ValueError(
+        "USER_ID não está configurado no arquivo .env. "
+        "Para o MVP, defina um identificador fixo (ex: USER_ID=user001)"
+    )
 
 # --- Configurações do agente ---
 TIMEZONE = os.getenv("TIMEZONE", "America/Sao_Paulo")
