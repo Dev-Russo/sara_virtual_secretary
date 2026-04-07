@@ -7,14 +7,19 @@ de mensagens longas.
 """
 
 import logging
+import os
 from telegram import Bot
 from telegram.error import TelegramError
-from app.config import TELEGRAM_BOT_TOKEN
 
 logger = logging.getLogger(__name__)
 
 # Limite de caracteres do Telegram
 MAX_MESSAGE_LENGTH = 4096
+
+# Lê o token diretamente da variável de ambiente
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN não está configurado")
 
 # Inicializa o bot uma única vez
 bot = Bot(token=TELEGRAM_BOT_TOKEN)

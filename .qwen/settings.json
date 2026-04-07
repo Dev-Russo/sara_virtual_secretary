@@ -4,7 +4,10 @@
       "Bash(test *)",
       "Bash(docker ps *)",
       "Bash(source *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(uvicorn *)",
+      "Bash(sleep *)",
+      "Bash(curl *)"
     ]
   },
   "$version": 3

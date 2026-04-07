@@ -6,8 +6,11 @@ para o resto do projeto — nunca use os.getenv() fora deste arquivo.
 
 from dotenv import load_dotenv
 import os
+from pathlib import Path
 
-load_dotenv()
+# Força o carregamento do .env do diretório raiz do projeto
+ENV_PATH = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
 
 # --- Modelo de linguagem ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
