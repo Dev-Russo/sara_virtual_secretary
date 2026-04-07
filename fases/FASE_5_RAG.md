@@ -1,4 +1,4 @@
-# Sara — Fase 4: RAG, Memória Longa e Deploy
+# Sara — Fase 5: RAG, Memória Longa e Deploy
 
 > **Objetivo:** Expandir a inteligência da Sara com memória semântica de longo prazo via RAG (Retrieval-Augmented Generation), e realizar o deploy completo do sistema em um servidor na nuvem para que pare de depender da máquina local.
 
@@ -6,13 +6,13 @@
 
 ## Visão Geral
 
-A Fase 4 resolve dois problemas fundamentais do sistema atual:
+A Fase 5 resolve dois problemas fundamentais do sistema atual:
 
 **Problema 1 — Memória limitada:** O histórico de conversa carrega apenas as últimas N mensagens. Referências a eventos antigos ("aquele compromisso que agendei mês passado", "o médico que falei em março") não são encontrados.
 
-**Problema 2 — Dependência local:** O sistema roda na máquina do usuário. Qualquer reinicialização, queda de luz ou desligamento para tudo.
+> **Nota:** O deploy em produção foi antecipado para a Fase 3. Esta fase assume que o sistema já está rodando em um VPS com PostgreSQL + pgvector disponível.
 
-A solução para o Problema 1 é um sistema de busca semântica — embeddings das conversas armazenados em banco vetorial, recuperados por similaridade quando relevantes. Para o Problema 2, deploy em VPS com Docker e processo gerenciado.
+A solução para o Problema 1 é um sistema de busca semântica — embeddings das conversas armazenados em banco vetorial, recuperados por similaridade quando relevantes.
 
 ---
 

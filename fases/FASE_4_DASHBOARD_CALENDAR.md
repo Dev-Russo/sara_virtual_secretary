@@ -1,4 +1,4 @@
-# Sara — Fase 3: Dashboard Web + Google Calendar
+# Sara — Fase 4: Dashboard Web + Google Calendar
 
 > **Objetivo:** Criar uma interface web onde o usuário pode visualizar tarefas e lembretes, editar registros, configurar preferências e conectar o Google Calendar para sincronização bidirecional.
 
@@ -6,7 +6,7 @@
 
 ## Visão Geral
 
-A Fase 3 adiciona visibilidade ao sistema. O Telegram continua sendo o canal principal de interação, mas o dashboard oferece uma visão consolidada de tudo que foi registrado — com edição direta, filtros e configurações que seriam difíceis de fazer por mensagem de texto.
+A Fase 4 adiciona visibilidade ao sistema. O Telegram continua sendo o canal principal de interação, mas o dashboard oferece uma visão consolidada de tudo que foi registrado — com edição direta, filtros e configurações que seriam difíceis de fazer por mensagem de texto.
 
 A integração com Google Calendar torna a Sara parte do ecossistema existente do usuário — eventos criados pela Sara aparecem na agenda, e eventos da agenda podem ser importados pela Sara.
 
@@ -293,7 +293,7 @@ Frontend armazena JWT e redireciona para dashboard
 
 ## Critérios de Aceitação da Fase
 
-A Fase 3 está concluída quando:
+A Fase 4 está concluída quando:
 
 - [ ] Login com Google funciona e gera JWT válido
 - [ ] Dashboard exibe tarefas e lembretes do usuário autenticado

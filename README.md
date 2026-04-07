@@ -106,8 +106,9 @@ sara-virtual-secretary/
 ├── fases/                      # Development phase documentation
 │   ├── FASE_1_CORE_CLI.md
 │   ├── FASE_2_TELEGRAM_SCHEDULER.md
-│   ├── FASE_3_DASHBOARD_CALENDAR.md
-│   └── FASE_4.md
+│   ├── FASE_3_DEPLOY.md
+│   ├── FASE_4_DASHBOARD_CALENDAR.md
+│   └── FASE_5_RAG.md
 ├── cli.py                      # CLI interface for debugging
 ├── docker-compose.yaml         # PostgreSQL service
 ├── requirements.txt
@@ -238,8 +239,9 @@ This project is being developed iteratively:
 
 - **Phase 1:** Core CLI — Conversational agent with task/reminder management ✅
 - **Phase 2:** Telegram Integration + Scheduler — Webhook, bot API, automatic reminders ✅
-- **Phase 3:** Dashboard & Calendar — Web interface and Google Calendar integration 🚧
-- **Phase 4:** Advanced Features — *(planned)*
+- **Phase 3:** Deploy — Production deployment to VPS, HTTPS, 24/7 availability 🚧
+- **Phase 4:** Dashboard & Calendar — Web interface and Google Calendar integration *(planned)*
+- **Phase 5:** RAG & Long-term Memory — Semantic memory with pgvector *(planned)*
 
 See the `fases/` directory for detailed specifications.
 
