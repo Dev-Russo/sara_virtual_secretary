@@ -16,6 +16,12 @@ __pycache__/
 ## Environment variables
 .env
 .env.evolution
+.env.prod
+.env.local
+
+## Deploy
+deploy/
+!deploy/docker-compose.*.yaml
 
 # Alembic
 alembic/versions/
