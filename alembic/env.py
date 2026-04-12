@@ -11,6 +11,7 @@ from app.db.database import Base
 from app.models.task import Task
 from app.models.reminder import Reminder
 from app.models.conversation import ConversationHistory
+from app.models.tool_call_log import ToolCallLog
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -10,19 +10,95 @@ o Groq entende. É esse schema que o modelo lê para saber quando e como
 chamar cada função.
 """
 
+import json
+import logging
 from datetime import datetime
+
+import pytz
+
 from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.reminder import Reminder
+from app.models.tool_call_log import ToolCallLog
+
+logger = logging.getLogger(__name__)
+
+# Timezone centralizado — todas as datas usam este TZ
+TIMEZONE = pytz.timezone("America/Sao_Paulo")
+
+# Constantes de validação
+VALID_PRIORITIES = ("low", "medium", "high")
+MAX_TITLE_LENGTH = 500
+MAX_MESSAGE_LENGTH = 1000
+
+
+# ============================================================
+# VALIDAÇÃO DE ARGUMENTOS
+# ============================================================
+
+def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
+    """
+    Valida os argumentos de uma tool antes de executar.
+    Retorna None se válido, ou string de erro se inválido.
+    """
+    if tool_name == "save_task":
+        title = argumentos.get("title", "")
+        if not title or not str(title).strip():
+            return "Erro: título da tarefa não pode ser vazio."
+        if len(str(title)) > MAX_TITLE_LENGTH:
+            return f"Erro: título da tarefa muito longo (máximo {MAX_TITLE_LENGTH} caracteres)."
+
+        priority = argumentos.get("priority", "medium")
+        if priority not in VALID_PRIORITIES:
+            return f"Erro: prioridade '{priority}' inválida. Use: {', '.join(VALID_PRIORITIES)}."
+
+        due_date = argumentos.get("due_date")
+        if due_date:
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    parsed = datetime.strptime(str(due_date).strip(), fmt)
+                    tz_aware = TIMEZONE.localize(parsed)
+                    if tz_aware <= datetime.now(TIMEZONE):
+                        return "Erro: a data da tarefa já passou. Forneça uma data futura."
+                    break
+                except ValueError:
+                    continue
+            else:
+                return "Erro: formato de data inválido. Use 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM'."
+
+    elif tool_name == "create_reminder":
+        message = argumentos.get("message", "")
+        if not message or not str(message).strip():
+            return "Erro: mensagem do lembrete não pode ser vazia."
+        if len(str(message)) > MAX_MESSAGE_LENGTH:
+            return f"Erro: mensagem do lembrete muito longa (máximo {MAX_MESSAGE_LENGTH} caracteres)."
+
+        remind_at = argumentos.get("remind_at")
+        if not remind_at:
+            return "Erro: campo 'remind_at' é obrigatório. Use 'YYYY-MM-DD HH:MM'."
+
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(str(remind_at).strip(), fmt)
+                tz_aware = TIMEZONE.localize(parsed)
+                if tz_aware <= datetime.now(TIMEZONE):
+                    return "Erro: o horário do lembrete já passou. Forneça um horário futuro."
+                break
+            except ValueError:
+                continue
+        else:
+            return "Erro: formato de data inválido. Use 'YYYY-MM-DD HH:MM'."
+
+    elif tool_name == "complete_task":
+        title = argumentos.get("title", "")
+        if not title or not str(title).strip():
+            return "Erro: título da tarefa não pode ser vazio."
+
+    return None  # Sem erros de validação
 
 
 # ============================================================
 # FUNÇÕES DAS TOOLS
-# Cada função:
-#   - recebe argumentos simples (str, int, etc.)
-#   - abre e fecha a própria sessão do banco
-#   - retorna uma string com o resultado
-#   - nunca levanta exceções — erros viram strings descritivas
 # ============================================================
 
 def save_task(title: str, user_id: str, due_date: str = None, priority: str = "medium") -> str:
@@ -31,23 +107,23 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
 
     Args:
         title: Título ou descrição da tarefa.
-        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
+        user_id: Identificador do usuário.
         due_date: Data/hora no formato 'YYYY-MM-DD HH:MM'. Opcional.
-        priority: Prioridade da tarefa — 'low', 'medium' ou 'high'.
+        priority: Prioridade — 'low', 'medium' ou 'high'.
 
     Returns:
         String confirmando o salvamento ou descrevendo o erro.
     """
     db = SessionLocal()
     try:
-        # Tenta converter a string de data para um objeto datetime
-        # Aceita dois formatos: com hora ou só a data
         parsed_date = None
         if due_date and isinstance(due_date, str) and due_date.strip():
             for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
                 try:
-                    parsed_date = datetime.strptime(due_date.strip(), fmt)
-                    break  # para no primeiro formato que funcionar
+                    parsed_naive = datetime.strptime(due_date.strip(), fmt)
+                    # #3A — Converte para timezone-aware antes de salvar
+                    parsed_date = TIMEZONE.localize(parsed_naive)
+                    break
                 except ValueError:
                     continue
 
@@ -67,7 +143,7 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
 
     except Exception as e:
         db.rollback()
-        print(f"[ERRO save_task] {e}")
+        logger.error(f"[save_task] {e}")
         return f"Erro ao salvar tarefa: {str(e)}"
     finally:
         db.close()
@@ -77,9 +153,12 @@ def create_reminder(message: str, user_id: str, remind_at: str) -> str:
     """
     Cria um lembrete para ser disparado em um horário específico.
 
+    #3A — Agora salva o datetime como timezone-aware para evitar
+    mismatch com o scheduler que compara com datetime.now(TIMEZONE).
+
     Args:
-        message: Texto que será enviado ao usuário no momento do lembrete.
-        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
+        message: Texto do lembrete.
+        user_id: Identificador do usuário.
         remind_at: Data/hora no formato 'YYYY-MM-DD HH:MM'.
 
     Returns:
@@ -87,7 +166,9 @@ def create_reminder(message: str, user_id: str, remind_at: str) -> str:
     """
     db = SessionLocal()
     try:
-        parsed_date = datetime.strptime(remind_at.strip(), "%Y-%m-%d %H:%M")
+        parsed_naive = datetime.strptime(remind_at.strip(), "%Y-%m-%d %H:%M")
+        # #3A — Converte para timezone-aware
+        parsed_date = TIMEZONE.localize(parsed_naive)
 
         reminder = Reminder(
             user_id=user_id,
@@ -104,7 +185,7 @@ def create_reminder(message: str, user_id: str, remind_at: str) -> str:
         return "Formato de data inválido. Use 'YYYY-MM-DD HH:MM'."
     except Exception as e:
         db.rollback()
-        print(f"[ERRO create_reminder] {e}")
+        logger.error(f"[create_reminder] {e}")
         return f"Erro ao criar lembrete: {str(e)}"
     finally:
         db.close()
@@ -115,8 +196,8 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
     Lista as tarefas pendentes do usuário.
 
     Args:
-        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
-        filter_date: Filtra tarefas de uma data específica no formato 'YYYY-MM-DD'. Opcional.
+        user_id: Identificador do usuário.
+        filter_date: Filtra tarefas de uma data específica 'YYYY-MM-DD'. Opcional.
 
     Returns:
         String com a lista de tarefas ou mensagem de lista vazia.
@@ -128,37 +209,42 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
             Task.status == "pending"
         )
 
-        # Aplica filtro de data se fornecido
         if filter_date and isinstance(filter_date, str) and filter_date.strip():
             try:
                 date = datetime.strptime(filter_date.strip(), "%Y-%m-%d")
+                inicio = TIMEZONE.localize(date.replace(hour=0, minute=0))
+                fim = TIMEZONE.localize(date.replace(hour=23, minute=59))
                 query = query.filter(
-                    Task.due_date >= date.replace(hour=0, minute=0),
-                    Task.due_date <= date.replace(hour=23, minute=59)
+                    Task.due_date >= inicio,
+                    Task.due_date <= fim,
                 )
             except ValueError:
-                pass  # ignora filtro inválido e retorna todas
+                pass  # ignora filtro inválido
 
-        # Ordena por data de vencimento, colocando tarefas sem data no final
         tasks = query.order_by(Task.due_date.asc().nullslast()).all()
 
         if not tasks:
+            if filter_date:
+                return f"Nenhuma tarefa encontrada para {filter_date}."
             return "Nenhuma tarefa pendente encontrada."
 
         linhas = [f"Você tem {len(tasks)} tarefa(s) pendente(s):"]
         for task in tasks:
-            prazo = (
-                f" — {task.due_date.strftime('%d/%m/%Y às %H:%M')}"
-                if task.due_date
-                else " — sem prazo definido"
-            )
+            if task.due_date:
+                # Garante que estamos lidando com aware datetime
+                dt = task.due_date
+                if dt.tzinfo is None:
+                    dt = TIMEZONE.localize(dt)
+                prazo = f" — {dt.strftime('%d/%m/%Y às %H:%M')}"
+            else:
+                prazo = " — sem prazo definido"
             prioridade = f" [{task.priority}]" if task.priority != "medium" else ""
             linhas.append(f"• {task.title}{prazo}{prioridade}")
 
         return "\n".join(linhas)
 
     except Exception as e:
-        print(f"[ERRO list_tasks] {e}")
+        logger.error(f"[list_tasks] {e}")
         return f"Erro ao listar tarefas: {str(e)}"
     finally:
         db.close()
@@ -169,15 +255,14 @@ def complete_task(title: str, user_id: str) -> str:
     Marca uma tarefa como concluída buscando pelo título.
 
     Args:
-        title: Título ou trecho do título da tarefa a ser concluída.
-        user_id: Identificador do usuário (chat_id do Telegram ou ID fixo do CLI).
+        title: Título ou trecho do título da tarefa.
+        user_id: Identificador do usuário.
 
     Returns:
         String confirmando a conclusão ou informando que não foi encontrada.
     """
     db = SessionLocal()
     try:
-        # Busca por correspondência parcial, ignorando maiúsculas/minúsculas
         task = db.query(Task).filter(
             Task.user_id == user_id,
             Task.status == "pending",
@@ -188,14 +273,14 @@ def complete_task(title: str, user_id: str) -> str:
             return f"Nenhuma tarefa pendente encontrada com '{title}'."
 
         task.status = "done"
-        task.updated_at = datetime.utcnow()
+        task.updated_at = datetime.now(TIMEZONE)
         db.commit()
 
         return f"Tarefa '{task.title}' marcada como concluída! ✅"
 
     except Exception as e:
         db.rollback()
-        print(f"[ERRO complete_task] {e}")
+        logger.error(f"[complete_task] {e}")
         return f"Erro ao concluir tarefa: {str(e)}"
     finally:
         db.close()
@@ -203,9 +288,6 @@ def complete_task(title: str, user_id: str) -> str:
 
 # ============================================================
 # MAPA DE TOOLS
-# Relaciona o nome da tool (string que o modelo usa) com
-# a função Python correspondente. Usado pelo agente para
-# saber qual função chamar após o modelo decidir.
 # ============================================================
 
 TOOLS_MAP: dict[str, callable] = {
@@ -218,13 +300,6 @@ TOOLS_MAP: dict[str, callable] = {
 
 # ============================================================
 # SCHEMA DAS TOOLS
-# Descrição formal das tools no formato JSON Schema que o Groq
-# (e outros LLMs compatíveis com OpenAI) entendem.
-#
-# O modelo lê esse schema para saber:
-#   - Quando chamar cada tool (description)
-#   - Quais argumentos passar (parameters)
-#   - Quais argumentos são obrigatórios (required)
 # ============================================================
 
 TOOLS_SCHEMA: list[dict] = [
@@ -275,7 +350,7 @@ TOOLS_SCHEMA: list[dict] = [
                     },
                     "remind_at": {
                         "type": "string",
-                        "description": "Data e hora exata no formato 'YYYY-MM-DD HH:MM'."
+                        "description": "Data e hora exata no formato 'YYYY-MM-DD HH:MM'. SEMPRE use data absoluta (YYYY-MM-DD), nunca use datas relativas."
                     }
                 },
                 "required": ["message", "remind_at"]

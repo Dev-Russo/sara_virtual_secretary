@@ -30,3 +30,6 @@ alembic/versions/
 QWEN.md
 .qwen/
 
+# Working docs (not for version control)
+CORRECOES_E_MELHORIAS.md
+
