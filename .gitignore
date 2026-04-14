@@ -30,6 +30,10 @@ alembic/versions/
 QWEN.md
 .qwen/
 
+# Claude
+CLAUDE.md
+.claude/
+
 # Working docs (not for version control)
 CORRECOES_E_MELHORIAS.md
 
