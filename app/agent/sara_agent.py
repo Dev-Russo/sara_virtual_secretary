@@ -434,6 +434,19 @@ def chat(mensagem: str, user_id: str) -> str:
                 })
 
             # Segunda chamada — formula resposta com resultados
+            # Para operações de escrita, injeta instrução explícita para não inventar contexto extra
+            WRITE_TOOLS = {"save_task", "create_reminder", "complete_task"}
+            tools_usadas = {tc.function.name for tc in msg.tool_calls}
+            if tools_usadas & WRITE_TOOLS:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "INSTRUÇÃO OBRIGATÓRIA: Confirme APENAS a operação acima que acabou de ser executada. "
+                        "NÃO mencione outras tarefas, lembretes ou histórico. "
+                        "NÃO invente contexto adicional. Seja direto e objetivo."
+                    ),
+                })
+
             resposta_final = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
                 messages=messages,
