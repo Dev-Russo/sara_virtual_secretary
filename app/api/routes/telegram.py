@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.agent.sara_agent import chat
 from app.services.telegram import enviar_mensagem_longa
+from app.config import ALLOWED_CHAT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,11 @@ async def telegram_webhook(update: TelegramUpdate, background_tasks: BackgroundT
         chat_id = str(message["chat"]["id"])
         text = message.get("text", "")
         first_name = message["chat"].get("first_name", "Usuário")
+
+        # Acesso restrito ao dono do bot
+        if ALLOWED_CHAT_ID and chat_id != ALLOWED_CHAT_ID:
+            logger.warning(f"[Webhook] Acesso negado para {first_name} ({chat_id})")
+            return JSONResponse(status_code=200, content={"status": "unauthorized"})
 
         if not text:
             logger.info(f"Mensagem não-texto recebida de {first_name} ({chat_id})")
