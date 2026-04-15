@@ -23,8 +23,8 @@ from app.db.database import SessionLocal
 from app.models.reminder import Reminder
 from app.models.task import Task
 from app.models.conversation import ConversationHistory
-from app.services.telegram import enviar_lembrete, enviar_briefing
-from app.config import BRIEFING_HORA
+from app.services.telegram import enviar_lembrete, enviar_briefing, enviar_checkin
+from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,9 @@ async def briefing_diario(forçar_envio: bool = False):
             if tarefa.due_date:
                 dt = tarefa.due_date
                 if dt.tzinfo is None:
-                    dt = TIMEZONE.localize(dt)
+                    dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
+                else:
+                    dt = dt.astimezone(TIMEZONE)
                 horario = dt.strftime("%H:%M")
             else:
                 horario = "sem prazo"
@@ -204,6 +206,23 @@ async def _enviar_briefing_vazio():
         logger.error(f"[Scheduler] Erro ao enviar briefing vazio: {e}")
     finally:
         db.close()
+
+
+async def checkin_noturno():
+    """
+    Envia check-in noturno para o usuário perguntando como foi o dia.
+    Horário configurável via CHECKIN_HORA (padrão: 21:00).
+    """
+    if not ALLOWED_CHAT_ID:
+        logger.warning("[Scheduler] ALLOWED_CHAT_ID não configurado, check-in pulado.")
+        return
+
+    logger.info(f"[Scheduler] Enviando check-in noturno para {ALLOWED_CHAT_ID}...")
+    enviado = await enviar_checkin(ALLOWED_CHAT_ID)
+    if enviado:
+        logger.info("[Scheduler] Check-in noturno enviado.")
+    else:
+        logger.warning("[Scheduler] Falha ao enviar check-in noturno.")
 
 
 async def briefing_catchup():
@@ -264,6 +283,18 @@ def iniciar_scheduler(scheduler: AsyncIOScheduler):
         replace_existing=True,
         timezone=TIMEZONE,
         kwargs={"forçar_envio": True},
+    )
+
+    hora_checkin, minuto_checkin = map(int, CHECKIN_HORA.split(":"))
+    scheduler.add_job(
+        checkin_noturno,
+        "cron",
+        hour=hora_checkin,
+        minute=minuto_checkin,
+        id="checkin_noturno",
+        name="Check-in noturno",
+        replace_existing=True,
+        timezone=TIMEZONE,
     )
 
     # #2B — Catchup: roda 30 segundos após o start para verificar

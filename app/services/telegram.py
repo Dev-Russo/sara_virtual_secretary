@@ -114,6 +114,30 @@ async def enviar_lembrete(chat_id: str, mensagem: str) -> bool:
             return False
 
 
+async def enviar_checkin(chat_id: str) -> bool:
+    """
+    Envia o check-in noturno perguntando como foi o dia.
+
+    Returns:
+        True se enviado com sucesso.
+    """
+    texto = (
+        "🌙 *Check-in do dia*\n\n"
+        "Como foi seu dia? Tem alguma tarefa que concluiu e quer registrar, "
+        "ou algo novo para colocar na agenda de amanhã?"
+    )
+    try:
+        await bot.send_message(chat_id=chat_id, text=texto, parse_mode="Markdown")
+        return True
+    except TelegramError as e:
+        logger.warning(f"Falha ao enviar check-in para {chat_id}: {e}")
+        try:
+            await bot.send_message(chat_id=chat_id, text=texto.replace("*", ""))
+            return True
+        except TelegramError:
+            return False
+
+
 async def enviar_briefing(chat_id: str, tarefas: list[str]) -> bool:
     """
     Envia o briefing diário com as tarefas do dia.
