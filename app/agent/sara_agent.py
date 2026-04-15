@@ -74,6 +74,25 @@ LIST_TASK_KEYWORDS = [
 ]
 
 
+COMPLETE_ALL_KEYWORDS = [
+    r"\bmarcar?\s+todas\b",
+    r"\bconcluir\s+todas\b",
+    r"\bfiz\s+tudo\b",
+    r"\bterminez?\s+tudo\b",
+    r"\bmarcar?\s+tudo\s+como\s+conclu",
+    r"\btodas\s+as\s+tarefas\s+como\s+conclu",
+    r"\btodas\s+como\s+conclu",
+]
+
+
+def _precisa_concluir_todas(mensagem: str) -> bool:
+    msg_lower = mensagem.lower().strip()
+    for pattern in COMPLETE_ALL_KEYWORDS:
+        if re.search(pattern, msg_lower):
+            return True
+    return False
+
+
 def _precisa_listar_tarefas(mensagem: str) -> bool:
     """
     Verifica se a mensagem do usuário contém keywords que indicam
@@ -331,6 +350,18 @@ def chat(mensagem: str, user_id: str) -> str:
     """
     historico = carregar_historico(user_id)
     system_prompt = get_system_prompt(user_id)
+
+    # Forced routing: "marcar todas como concluídas"
+    if _precisa_concluir_todas(mensagem):
+        filter_date = _calcular_data_filtro(mensagem)
+        logger.info(f"[Forced routing] Concluindo todas as tarefas (filter_date={filter_date})")
+        tool_result = executar_tool(
+            "complete_all_tasks", {"filter_date": filter_date} if filter_date else {},
+            user_id=user_id,
+        )
+        salvar_historico(user_id, "user", mensagem)
+        salvar_historico(user_id, "assistant", tool_result)
+        return tool_result
 
     # #1A — Forced tool routing: verifica se precisa listar tarefas direto do banco
     filter_date = None
