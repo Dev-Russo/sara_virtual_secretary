@@ -231,10 +231,12 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
         linhas = [f"Você tem {len(tasks)} tarefa(s) pendente(s):"]
         for task in tasks:
             if task.due_date:
-                # Garante que estamos lidando com aware datetime
                 dt = task.due_date
                 if dt.tzinfo is None:
-                    dt = TIMEZONE.localize(dt)
+                    # Banco gravou em UTC sem offset — converte corretamente
+                    dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
+                else:
+                    dt = dt.astimezone(TIMEZONE)
                 prazo = f" — {dt.strftime('%d/%m/%Y às %H:%M')}"
             else:
                 prazo = " — sem prazo definido"
