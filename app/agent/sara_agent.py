@@ -345,17 +345,20 @@ def chat(mensagem: str, user_id: str) -> str:
             user_id=user_id,
         )
 
-        # Monta contexto com resultado da tool e pede pro LLM formatar
+        # Monta contexto com resultado da tool e pede pro LLM formatar.
+        # NÃO inclui histórico — o banco é a única fonte de verdade aqui.
+        # Incluir histórico faz o LLM usar respostas anteriores como fonte,
+        # inventando tarefas que já existiam na conversa mas não no banco.
         messages = [
             {"role": "system", "content": system_prompt},
-            *historico,
             {"role": "user", "content": mensagem},
             {
                 "role": "system",
                 "content": (
-                    f"RESULTADO DA CONSULTA AO BANCO (use ESTES dados exatamente, não invente nada):\n"
+                    f"RESULTADO DA CONSULTA AO BANCO — esta é a lista COMPLETA e REAL de tarefas. "
+                    f"Use EXATAMENTE estes dados. NÃO adicione tarefas do histórico de conversa.\n\n"
                     f"{tool_result}\n\n"
-                    f"Formate esta informação de forma amigável para o usuário. "
+                    f"Formate esta informação de forma amigável. "
                     f"NÃO invente tarefas que não estão na lista acima. "
                     f"NÃO omita tarefas que estão na lista acima."
                 ),
