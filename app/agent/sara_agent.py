@@ -75,12 +75,13 @@ LIST_TASK_KEYWORDS = [
 
 
 COMPLETE_ALL_KEYWORDS = [
+    r"\bmarqu[ea]\s+todas\b",
     r"\bmarcar?\s+todas\b",
     r"\bconcluir\s+todas\b",
     r"\bfiz\s+tudo\b",
     r"\bterminez?\s+tudo\b",
     r"\bmarcar?\s+tudo\s+como\s+conclu",
-    r"\btodas\s+as\s+tarefas\s+como\s+conclu",
+    r"\btodas.*tarefas.*conclu",
     r"\btodas\s+como\s+conclu",
 ]
 

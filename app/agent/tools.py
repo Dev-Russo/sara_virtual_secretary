@@ -310,11 +310,24 @@ def complete_task(title: str, user_id: str) -> str:
     """
     db = SessionLocal()
     try:
+        # Tentativa 1 — busca direta pelo título
         task = db.query(Task).filter(
             Task.user_id == user_id,
             Task.status == "pending",
             Task.title.ilike(f"%{title}%")
         ).first()
+
+        # Tentativa 2 — busca por palavras individuais (resiliência a acentos corrompidos pelo LLM)
+        if not task:
+            palavras = [p for p in title.split() if len(p) > 3]
+            for palavra in palavras:
+                task = db.query(Task).filter(
+                    Task.user_id == user_id,
+                    Task.status == "pending",
+                    Task.title.ilike(f"%{palavra}%")
+                ).first()
+                if task:
+                    break
 
         if not task:
             return f"Nenhuma tarefa pendente encontrada com '{title}'."
