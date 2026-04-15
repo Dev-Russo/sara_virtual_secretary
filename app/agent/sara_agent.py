@@ -392,14 +392,29 @@ def chat(mensagem: str, user_id: str) -> str:
 
     try:
         # Primeira chamada — modelo decide
-        resposta_inicial = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            tools=TOOLS_SCHEMA,
-            tool_choice="auto",
-            temperature=GROQ_TEMPERATURE,
-            max_tokens=GROQ_MAX_TOKENS,
-        )
+        try:
+            resposta_inicial = groq_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                tools=TOOLS_SCHEMA,
+                tool_choice="auto",
+                temperature=GROQ_TEMPERATURE,
+                max_tokens=GROQ_MAX_TOKENS,
+            )
+        except Exception as e:
+            # Erro 400 tool_use_failed: modelo gerou tool call malformada.
+            # Fallback: segunda tentativa sem tools, resposta direta.
+            logger.warning(f"[chat] Falha na chamada com tools ({e}), tentando sem tools...")
+            resposta_sem_tool = groq_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                temperature=GROQ_TEMPERATURE,
+                max_tokens=GROQ_MAX_TOKENS,
+            )
+            resposta = resposta_sem_tool.choices[0].message.content
+            salvar_historico(user_id, "user", mensagem)
+            salvar_historico(user_id, "assistant", resposta)
+            return resposta
 
         msg = resposta_inicial.choices[0].message
 

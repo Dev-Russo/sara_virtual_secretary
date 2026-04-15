@@ -252,6 +252,51 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
         db.close()
 
 
+def complete_all_tasks(user_id: str, filter_date: str = None) -> str:
+    """
+    Marca todas as tarefas pendentes do usuário como concluídas.
+    Se filter_date fornecido, marca apenas as tarefas daquele dia.
+    """
+    db = SessionLocal()
+    try:
+        query = db.query(Task).filter(
+            Task.user_id == user_id,
+            Task.status == "pending",
+        )
+
+        if filter_date:
+            try:
+                date = datetime.strptime(filter_date.strip(), "%Y-%m-%d")
+                inicio = TIMEZONE.localize(date.replace(hour=0, minute=0))
+                fim = TIMEZONE.localize(date.replace(hour=23, minute=59))
+                query = query.filter(
+                    Task.due_date >= inicio,
+                    Task.due_date <= fim,
+                )
+            except ValueError:
+                pass
+
+        tasks = query.all()
+
+        if not tasks:
+            return "Nenhuma tarefa pendente encontrada para marcar como concluída."
+
+        for task in tasks:
+            task.status = "done"
+            task.updated_at = datetime.now(TIMEZONE)
+
+        db.commit()
+        titulos = ", ".join(f"'{t.title}'" for t in tasks)
+        return f"Tarefas {titulos} marcadas como concluídas! ✅"
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[complete_all_tasks] {e}")
+        return f"Erro ao concluir tarefas: {str(e)}"
+    finally:
+        db.close()
+
+
 def complete_task(title: str, user_id: str) -> str:
     """
     Marca uma tarefa como concluída buscando pelo título.
@@ -297,6 +342,7 @@ TOOLS_MAP: dict[str, callable] = {
     "create_reminder": create_reminder,
     "list_tasks": list_tasks,
     "complete_task": complete_task,
+    "complete_all_tasks": complete_all_tasks,
 }
 
 
@@ -383,11 +429,32 @@ TOOLS_SCHEMA: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "complete_all_tasks",
+            "description": (
+                "Marca TODAS as tarefas pendentes como concluídas de uma vez. "
+                "Use quando o usuário disser 'marcar todas', 'concluir tudo', 'fiz tudo hoje' ou similar. "
+                "Prefira esta tool a chamar complete_task múltiplas vezes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter_date": {
+                        "type": "string",
+                        "description": "Filtra apenas tarefas de uma data específica 'YYYY-MM-DD'. Opcional."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "complete_task",
             "description": (
-                "Marca uma tarefa como concluída. "
-                "Use quando o usuário disser que já fez algo, "
-                "que pode riscar uma tarefa ou que terminou alguma atividade."
+                "Marca uma tarefa específica como concluída. "
+                "Use quando o usuário mencionar uma tarefa específica que terminou. "
+                "Para marcar todas de uma vez, use complete_all_tasks."
             ),
             "parameters": {
                 "type": "object",
