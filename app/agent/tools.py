@@ -323,7 +323,7 @@ TOOLS_SCHEMA: list[dict] = [
                     },
                     "due_date": {
                         "type": "string",
-                        "description": "Data e hora no formato 'YYYY-MM-DD HH:MM'. Null se não informado."
+                        "description": "Data e hora no formato 'YYYY-MM-DD HH:MM'. Deixe null se o usuário NÃO informou data — nunca invente uma data."
                     },
                     "priority": {
                         "type": "string",
