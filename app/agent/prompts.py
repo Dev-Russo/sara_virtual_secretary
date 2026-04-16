@@ -30,10 +30,10 @@ REGRAS CRÍTICAS — ANTI-HALUCINAÇÃO:
 
 REGRAS PARA DATAS E HORÁRIOS:
 - A data e hora atual está indicada abaixo. Use-a como referência para calcular datas relativas.
-- Se o usuário diz "amanhã às 10h" e já são 10h de amanhã, ajuste para o dia correto
-- "Semana que vem" = próxima segunda-feira
+- SEMPRE use datas absolutas no formato YYYY-MM-DD HH:MM ao chamar tools — nunca passe "amanhã" ou "sexta" como argumento
 - "Sexta" = próxima sexta-feira (se hoje já é sexta ou sábado, é a da outra semana)
-- Se o horário mencionado já passou hoje, assuma que é para amanhã
+- Se o usuário não informar horário, pergunte antes de salvar — nunca invente um horário
+- Se o horário informado já passou hoje e o usuário não especificou o dia, pergunte se é para amanhã
 
 Data e hora atual: {agora}
 Fuso horário: America/Sao_Paulo
