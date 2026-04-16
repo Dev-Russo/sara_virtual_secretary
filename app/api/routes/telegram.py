@@ -11,7 +11,6 @@ Proteções contra duplicatas:
   o agente, eliminando a causa raiz dos retries
 """
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, BackgroundTasks
@@ -21,14 +20,35 @@ from pydantic import BaseModel
 from app.agent.sara_agent import chat
 from app.services.telegram import enviar_mensagem_longa
 from app.config import ALLOWED_CHAT_ID
+from app.db.database import SessionLocal
+from app.models.processed_update import ProcessedUpdate
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["telegram"])
 
-# Cache de update_ids já processados (últimos 1000)
-_processed_updates: set[int] = set()
-_MAX_CACHE = 1000
+
+def _ja_processado(update_id: int) -> bool:
+    """Verifica se o update_id já foi processado (persistido no banco)."""
+    db = SessionLocal()
+    try:
+        return db.query(ProcessedUpdate).filter(
+            ProcessedUpdate.update_id == update_id
+        ).first() is not None
+    finally:
+        db.close()
+
+
+def _marcar_processado(update_id: int) -> None:
+    """Persiste o update_id no banco para deduplicação entre restarts."""
+    db = SessionLocal()
+    try:
+        db.add(ProcessedUpdate(update_id=update_id))
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 
 
 class TelegramUpdate(BaseModel):
@@ -58,17 +78,12 @@ async def telegram_webhook(update: TelegramUpdate, background_tasks: BackgroundT
     que o Telegram considere timeout e reenvie o mesmo update.
     """
     try:
-        # Deduplicação por update_id — ignora retries do Telegram
+        # Deduplicação por update_id — persistida no banco, sobrevive a restarts
         if update.update_id is not None:
-            if update.update_id in _processed_updates:
+            if _ja_processado(update.update_id):
                 logger.info(f"[Webhook] update_id {update.update_id} já processado, ignorando.")
                 return JSONResponse(status_code=200, content={"status": "duplicate"})
-            _processed_updates.add(update.update_id)
-            # Limpa cache se crescer demais
-            if len(_processed_updates) > _MAX_CACHE:
-                oldest = sorted(_processed_updates)[:_MAX_CACHE // 2]
-                for uid in oldest:
-                    _processed_updates.discard(uid)
+            _marcar_processado(update.update_id)
 
         message = update.message
         if not message:

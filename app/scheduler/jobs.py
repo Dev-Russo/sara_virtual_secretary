@@ -23,6 +23,7 @@ from app.db.database import SessionLocal
 from app.models.reminder import Reminder
 from app.models.task import Task
 from app.models.conversation import ConversationHistory
+from app.models.processed_update import ProcessedUpdate
 from app.services.telegram import enviar_lembrete, enviar_briefing, enviar_checkin
 from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
 
@@ -208,6 +209,27 @@ async def _enviar_briefing_vazio():
         db.close()
 
 
+async def limpar_updates_antigos():
+    """
+    Remove registros de processed_updates com mais de 7 dias.
+    Roda diariamente para evitar crescimento indefinido da tabela.
+    """
+    db = SessionLocal()
+    try:
+        limite = datetime.now(TIMEZONE) - timedelta(days=7)
+        deletados = db.query(ProcessedUpdate).filter(
+            ProcessedUpdate.created_at < limite
+        ).delete()
+        db.commit()
+        if deletados:
+            logger.info(f"[Scheduler] {deletados} update(s) antigos removidos.")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[Scheduler] Erro ao limpar updates antigos: {e}")
+    finally:
+        db.close()
+
+
 async def checkin_noturno():
     """
     Envia check-in noturno para o usuário perguntando como foi o dia.
@@ -283,6 +305,17 @@ def iniciar_scheduler(scheduler: AsyncIOScheduler):
         replace_existing=True,
         timezone=TIMEZONE,
         kwargs={"forçar_envio": True},
+    )
+
+    scheduler.add_job(
+        limpar_updates_antigos,
+        "cron",
+        hour=3,
+        minute=0,
+        id="limpar_updates_antigos",
+        name="Remove processed_updates com mais de 7 dias",
+        replace_existing=True,
+        timezone=TIMEZONE,
     )
 
     hora_checkin, minuto_checkin = map(int, CHECKIN_HORA.split(":"))
