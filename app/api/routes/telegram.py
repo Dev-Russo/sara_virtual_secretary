@@ -5,27 +5,32 @@ Responsável por receber os eventos do Telegram e despachar
 para o agente Sara.
 
 Proteções contra duplicatas:
-- _processed_updates: cache em memória dos update_ids já processados
-  (evita reprocessamento quando o Telegram reenvia por timeout)
-- Processamento em background: retorna 200 imediatamente antes de chamar
-  o agente, eliminando a causa raiz dos retries
+- update_id persistido no banco (sobrevive a restarts)
+- Processamento em background: retorna 200 imediatamente, eliminando retries
+
+Suporte a áudio:
+- Mensagens de voz são transcritas via Whisper (Groq) antes de passar ao agente
 """
 
 import logging
+import tempfile
 
 from fastapi import APIRouter, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from groq import Groq
 
 from app.agent.sara_agent import chat
 from app.services.telegram import enviar_mensagem_longa
-from app.config import ALLOWED_CHAT_ID
+from app.config import ALLOWED_CHAT_ID, GROQ_API_KEY
 from app.db.database import SessionLocal
 from app.models.processed_update import ProcessedUpdate
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["telegram"])
+
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 
 def _ja_processado(update_id: int) -> bool:
@@ -56,6 +61,38 @@ class TelegramUpdate(BaseModel):
     update_id: int | None = None
     message: dict | None = None
     edited_message: dict | None = None
+
+
+async def _transcrever_audio(file_id: str) -> str | None:
+    """
+    Baixa o arquivo de voz do Telegram e transcreve via Whisper (Groq).
+    Retorna o texto transcrito ou None em caso de erro.
+    """
+    try:
+        from app.services.telegram import bot
+        telegram_file = await bot.get_file(file_id)
+
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            await telegram_file.download_to_drive(tmp.name)
+            tmp_path = tmp.name
+
+        with open(tmp_path, "rb") as audio_file:
+            transcricao = groq_client.audio.transcriptions.create(
+                file=("audio.ogg", audio_file, "audio/ogg"),
+                model="whisper-large-v3-turbo",
+                language="pt",
+            )
+
+        import os
+        os.unlink(tmp_path)
+
+        texto = transcricao.text.strip()
+        logger.info(f"[Whisper] Transcrição: {texto[:100]}")
+        return texto
+
+    except Exception as e:
+        logger.error(f"[Whisper] Erro na transcrição: {e}", exc_info=True)
+        return None
 
 
 async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
@@ -90,13 +127,24 @@ async def telegram_webhook(update: TelegramUpdate, background_tasks: BackgroundT
             return JSONResponse(status_code=200, content={"status": "ignored"})
 
         chat_id = str(message["chat"]["id"])
-        text = message.get("text", "")
         first_name = message["chat"].get("first_name", "Usuário")
 
         # Acesso restrito ao dono do bot
         if ALLOWED_CHAT_ID and chat_id != ALLOWED_CHAT_ID:
             logger.warning(f"[Webhook] Acesso negado para {first_name} ({chat_id})")
             return JSONResponse(status_code=200, content={"status": "unauthorized"})
+
+        text = message.get("text", "")
+
+        # Mensagem de voz — transcrever via Whisper antes de processar
+        if not text and "voice" in message:
+            file_id = message["voice"]["file_id"]
+            logger.info(f"🎤 Áudio de {first_name} ({chat_id}), transcrevendo...")
+            text = await _transcrever_audio(file_id)
+            if not text:
+                await enviar_mensagem_longa(chat_id, "Não consegui entender o áudio. Pode repetir ou digitar?")
+                return JSONResponse(status_code=200, content={"status": "transcription_failed"})
+            logger.info(f"🎤 Transcrito: {text[:50]}...")
 
         if not text:
             logger.info(f"Mensagem não-texto recebida de {first_name} ({chat_id})")
