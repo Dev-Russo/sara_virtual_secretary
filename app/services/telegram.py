@@ -28,21 +28,26 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 async def enviar_mensagem(chat_id: str, texto: str) -> bool:
     """
     Envia uma mensagem simples para um chat do Telegram.
-
-    Args:
-        chat_id: Identificador do chat (geralmente o ID do usuário).
-        texto: Texto da mensagem a ser enviada.
+    Tenta até 3 vezes com intervalo de 2s em caso de falha.
 
     Returns:
         True se a mensagem foi enviada com sucesso, False caso contrário.
     """
-    try:
-        await bot.send_message(chat_id=chat_id, text=texto)
-        return True
+    import asyncio
+    tentativas = 3
+    for tentativa in range(1, tentativas + 1):
+        try:
+            await bot.send_message(chat_id=chat_id, text=texto)
+            if tentativa > 1:
+                logger.info(f"Mensagem enviada para {chat_id} na tentativa {tentativa}.")
+            return True
+        except TelegramError as e:
+            logger.warning(f"Tentativa {tentativa}/{tentativas} falhou para {chat_id}: {e}")
+            if tentativa < tentativas:
+                await asyncio.sleep(2)
 
-    except TelegramError as e:
-        logger.warning(f"Falha ao enviar mensagem para {chat_id}: {e}")
-        return False
+    logger.error(f"Falha definitiva ao enviar mensagem para {chat_id} após {tentativas} tentativas.")
+    return False
 
 
 async def enviar_mensagem_longa(chat_id: str, texto: str) -> bool:
