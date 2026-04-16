@@ -214,6 +214,27 @@ async def _enviar_briefing_vazio():
         db.close()
 
 
+async def limpar_historico_antigo():
+    """
+    Remove mensagens do conversation_history com mais de 30 dias.
+    Mantém o banco enxuto sem impactar o contexto das conversas recentes.
+    """
+    db = SessionLocal()
+    try:
+        limite = datetime.now(TIMEZONE) - timedelta(days=30)
+        deletados = db.query(ConversationHistory).filter(
+            ConversationHistory.created_at < limite
+        ).delete()
+        db.commit()
+        if deletados:
+            logger.info(f"[Scheduler] {deletados} mensagem(ns) antigas do histórico removidas.")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[Scheduler] Erro ao limpar histórico: {e}")
+    finally:
+        db.close()
+
+
 async def limpar_updates_antigos():
     """
     Remove registros de processed_updates com mais de 7 dias.
@@ -310,6 +331,17 @@ def iniciar_scheduler(scheduler: AsyncIOScheduler):
         replace_existing=True,
         timezone=TIMEZONE,
         kwargs={"forçar_envio": True},
+    )
+
+    scheduler.add_job(
+        limpar_historico_antigo,
+        "cron",
+        hour=3,
+        minute=30,
+        id="limpar_historico_antigo",
+        name="Remove histórico de conversa com mais de 30 dias",
+        replace_existing=True,
+        timezone=TIMEZONE,
     )
 
     scheduler.add_job(

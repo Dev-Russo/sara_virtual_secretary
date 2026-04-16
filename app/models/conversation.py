@@ -1,7 +1,7 @@
 from sqlalchemy import Column, String, Text, DateTime
+from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.database import Base
-from datetime import datetime
 import uuid
 
 class ConversationHistory(Base):
@@ -11,4 +11,4 @@ class ConversationHistory(Base):
     user_id = Column(String(20), nullable=False)
     role = Column(String(15), nullable=False)
     content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

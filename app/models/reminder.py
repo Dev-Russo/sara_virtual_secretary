@@ -1,7 +1,7 @@
 from sqlalchemy import Column, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.database import Base
-from datetime import datetime
 import uuid
 
 class Reminder(Base):
@@ -11,6 +11,6 @@ class Reminder(Base):
     task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True)
     user_id = Column(String(20), nullable=False)
     message = Column(Text, nullable=False)
-    remind_at = Column(DateTime, nullable=False)
+    remind_at = Column(DateTime(timezone=True), nullable=False)
     sent = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
