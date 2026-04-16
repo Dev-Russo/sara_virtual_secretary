@@ -23,8 +23,6 @@ __pycache__/
 deploy/
 !deploy/docker-compose.*.yaml
 
-# Alembic
-alembic/versions/
 
 # QWEN
 QWEN.md
