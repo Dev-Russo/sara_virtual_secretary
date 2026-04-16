@@ -150,14 +150,14 @@ async def enviar_briefing(chat_id: str, tarefas: list[str]) -> bool:
         True se o briefing foi enviado com sucesso.
     """
     if not tarefas:
-        return True  # Sem tarefas, não envia nada
-
-    linhas = "\n".join(f"• {t}" for t in tarefas)
-    texto = (
-        f"☀️ *Briefing do Dia*\n\n"
-        f"Você tem {len(tarefas)} tarefa(s) para hoje:\n\n"
-        f"{linhas}\n\n"
-        f"Bom trabalho! 💪"
-    )
+        texto = "☀️ *Briefing do Dia*\n\nNenhuma tarefa para hoje, gostaria de adicionar alguma tarefa? Por enquanto você está com o dia livre! 🎉"
+    else:
+        linhas = "\n".join(f"• {t}" for t in tarefas)
+        texto = (
+            f"☀️ *Briefing do Dia*\n\n"
+            f"Você tem {len(tarefas)} tarefa(s) para hoje:\n\n"
+            f"{linhas}\n\n"
+            f"Bom trabalho! 💪"
+        )
 
     return await enviar_mensagem_longa(chat_id, texto)
