@@ -150,8 +150,8 @@ async def briefing_diario(forçar_envio: bool = False):
                 logger.info("[Scheduler] Sem tarefas para hoje, briefing pulado")
             return
 
-        # Agrupa por usuário
-        usuarios: dict[str, list[str]] = {}
+        # Agrupa por usuário — tarefas com horário primeiro (ordenadas), sem prazo no final
+        usuarios: dict[str, list[tuple]] = {}
         for tarefa in todas_tarefas:
             if tarefa.user_id not in usuarios:
                 usuarios[tarefa.user_id] = []
@@ -162,11 +162,16 @@ async def briefing_diario(forçar_envio: bool = False):
                 else:
                     dt = dt.astimezone(TIMEZONE)
                 horario = dt.strftime("%H:%M")
+                sort_key = dt
             else:
                 horario = "sem prazo"
-            usuarios[tarefa.user_id].append(f"{horario} — {tarefa.title}")
+                sort_key = None
+            usuarios[tarefa.user_id].append((sort_key, f"{horario} — {tarefa.title}"))
 
-        for user_id, tarefas in usuarios.items():
+        for user_id, tarefas_raw in usuarios.items():
+            # Ordena: com horário primeiro (crescente), sem prazo no final
+            tarefas_raw.sort(key=lambda x: (x[0] is None, x[0] or datetime.min))
+            tarefas = [texto for _, texto in tarefas_raw]
             enviado = await enviar_briefing(user_id, tarefas)
             if enviado:
                 logger.info(f"[Scheduler] Briefing enviado para {user_id} ({len(tarefas)} tarefas)")
