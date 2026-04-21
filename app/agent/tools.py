@@ -365,120 +365,105 @@ TOOLS_MAP: dict[str, callable] = {
 
 TOOLS_SCHEMA: list[dict] = [
     {
-        "type": "function",
-        "function": {
-            "name": "save_task",
-            "description": (
-                "Salva uma nova tarefa no banco de dados. "
-                "Use quando o usuário mencionar algo que precisa fazer, "
-                "uma obrigação, um compromisso ou qualquer coisa que não pode esquecer."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Título ou descrição da tarefa."
-                    },
-                    "due_date": {
-                        "type": "string",
-                        "description": "Data e hora no formato 'YYYY-MM-DD HH:MM'. Deixe null se o usuário NÃO informou data — nunca invente uma data."
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["low", "medium", "high"],
-                        "description": "Prioridade da tarefa."
-                    }
+        "name": "save_task",
+        "description": (
+            "Salva uma nova tarefa no banco de dados. "
+            "Use quando o usuário mencionar algo que precisa fazer, "
+            "uma obrigação, um compromisso ou qualquer coisa que não pode esquecer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Título ou descrição da tarefa."
                 },
-                "required": ["title"]
-            }
+                "due_date": {
+                    "type": "string",
+                    "description": "Data e hora no formato 'YYYY-MM-DD HH:MM'. Deixe null se o usuário NÃO informou data — nunca invente uma data."
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "Prioridade da tarefa."
+                }
+            },
+            "required": ["title"]
         }
     },
     {
-        "type": "function",
-        "function": {
-            "name": "create_reminder",
-            "description": (
-                "Cria um lembrete para ser disparado em horário específico. "
-                "Use quando o usuário pedir para ser lembrado de algo em uma data ou hora."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "Texto do lembrete a ser enviado ao usuário."
-                    },
-                    "remind_at": {
-                        "type": "string",
-                        "description": "Data e hora exata no formato 'YYYY-MM-DD HH:MM'. SEMPRE use data absoluta (YYYY-MM-DD), nunca use datas relativas."
-                    }
+        "name": "create_reminder",
+        "description": (
+            "Cria um lembrete para ser disparado em horário específico. "
+            "Use quando o usuário pedir para ser lembrado de algo em uma data ou hora."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Texto do lembrete a ser enviado ao usuário."
                 },
-                "required": ["message", "remind_at"]
-            }
+                "remind_at": {
+                    "type": "string",
+                    "description": "Data e hora exata no formato 'YYYY-MM-DD HH:MM'. SEMPRE use data absoluta (YYYY-MM-DD), nunca use datas relativas."
+                }
+            },
+            "required": ["message", "remind_at"]
         }
     },
     {
-        "type": "function",
-        "function": {
-            "name": "list_tasks",
-            "description": (
-                "Lista as tarefas pendentes do usuário. "
-                "Use quando o usuário perguntar o que tem para fazer, "
-                "quais são suas tarefas ou compromissos."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filter_date": {
-                        "type": "string",
-                        "description": "Filtra tarefas de uma data específica no formato 'YYYY-MM-DD'. Opcional."
-                    }
-                },
-                "required": []
-            }
+        "name": "list_tasks",
+        "description": (
+            "Lista as tarefas pendentes do usuário. "
+            "Use quando o usuário perguntar o que tem para fazer, "
+            "quais são suas tarefas ou compromissos."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter_date": {
+                    "type": "string",
+                    "description": "Filtra tarefas de uma data específica no formato 'YYYY-MM-DD'. Opcional."
+                }
+            },
+            "required": []
         }
     },
     {
-        "type": "function",
-        "function": {
-            "name": "complete_all_tasks",
-            "description": (
-                "Marca TODAS as tarefas pendentes como concluídas de uma vez. "
-                "Use quando o usuário disser 'marcar todas', 'concluir tudo', 'fiz tudo hoje' ou similar. "
-                "Prefira esta tool a chamar complete_task múltiplas vezes."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filter_date": {
-                        "type": "string",
-                        "description": "Filtra apenas tarefas de uma data específica 'YYYY-MM-DD'. Opcional."
-                    }
-                },
-                "required": []
-            }
+        "name": "complete_all_tasks",
+        "description": (
+            "Marca TODAS as tarefas pendentes como concluídas de uma vez. "
+            "Use quando o usuário disser 'marcar todas', 'concluir tudo', 'fiz tudo hoje' ou similar. "
+            "Prefira esta tool a chamar complete_task múltiplas vezes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter_date": {
+                    "type": "string",
+                    "description": "Filtra apenas tarefas de uma data específica 'YYYY-MM-DD'. Opcional."
+                }
+            },
+            "required": []
         }
     },
     {
-        "type": "function",
-        "function": {
-            "name": "complete_task",
-            "description": (
-                "Marca uma tarefa específica como concluída. "
-                "Use quando o usuário mencionar uma tarefa específica que terminou. "
-                "Para marcar todas de uma vez, use complete_all_tasks."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Título ou trecho do título da tarefa a ser concluída."
-                    }
-                },
-                "required": ["title"]
-            }
+        "name": "complete_task",
+        "description": (
+            "Marca uma tarefa específica como concluída. "
+            "Use quando o usuário mencionar uma tarefa específica que terminou. "
+            "Para marcar todas de uma vez, use complete_all_tasks."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Título ou trecho do título da tarefa a ser concluída."
+                }
+            },
+            "required": ["title"]
         }
     }
 ]

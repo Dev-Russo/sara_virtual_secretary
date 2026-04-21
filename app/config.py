@@ -12,11 +12,13 @@ from pathlib import Path
 ENV_PATH = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
 
-# --- Modelo de linguagem ---
+# --- Groq (mantido para transcrição de áudio via Whisper) ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.3"))
-GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
+
+# --- Anthropic (LLM principal) ---
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+ANTHROPIC_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "1024"))
 
 # --- Banco de dados ---
 DATABASE_URL = os.getenv("DATABASE_URL")

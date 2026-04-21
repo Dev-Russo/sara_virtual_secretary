@@ -3,7 +3,7 @@ Agente principal da Sara.
 
 Responsável por:
 - Montar o contexto de cada conversa (histórico + mensagem atual)
-- Fazer as chamadas à API do Groq
+- Fazer as chamadas à API da Anthropic
 - Executar as tools quando o modelo solicitar (ou forçar por keywords)
 - Salvar o histórico de conversa no banco
 - Registrar audit logs de todas as tool calls
@@ -13,10 +13,10 @@ Fluxo de uma mensagem:
     1. Carrega histórico do banco
     2. Verifica se a mensagem requer tool forçada por keywords
     3. Se sim: executa a tool diretamente e injeta resultado no contexto
-    4. Se não: monta lista de mensagens [system + histórico + mensagem atual]
-    5. Primeira chamada ao Groq — modelo decide: responder ou usar tool
+    4. Se não: monta lista de mensagens [histórico + mensagem atual]
+    5. Primeira chamada Anthropic — modelo decide: responder ou usar tool
     6. Se usar tool: valida argumentos, executa, loga audit, adiciona resultado
-    7. Segunda chamada ao Groq — modelo formula resposta final
+    7. Segunda chamada Anthropic — modelo formula resposta final
     8. Verifica grounding: resposta contém dados reais da tool?
     9. Salva a troca no histórico e retorna a resposta
 """
@@ -27,7 +27,7 @@ import re
 from datetime import datetime
 
 import pytz
-from groq import Groq
+import anthropic
 
 from app.agent.tools import (
     TOOLS_MAP,
@@ -40,22 +40,19 @@ from app.db.database import SessionLocal
 from app.models.conversation import ConversationHistory
 from app.models.tool_call_log import ToolCallLog
 from app.config import (
-    GROQ_API_KEY,
-    GROQ_MODEL,
-    GROQ_TEMPERATURE,
-    GROQ_MAX_TOKENS,
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_MODEL,
+    ANTHROPIC_MAX_TOKENS,
 )
 
 logger = logging.getLogger(__name__)
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ============================================================
 # FORCED TOOL ROUTING — Keywords que bypassam decisão do LLM
 # ============================================================
 
-# Padrões de keywords que indicam que o usuário quer ver dados reais do banco,
-# não uma resposta genérica do LLM.
 LIST_TASK_KEYWORDS = [
     r"\bminhas\s+tarefas\b",
     r"\bo\s+que\s+tenho\b",
@@ -72,7 +69,6 @@ LIST_TASK_KEYWORDS = [
     r"\btenho\s+alguma\s+tarefa\b",
     r"\bquais\s+são\s+minhas\s+tarefas\b",
 ]
-
 
 COMPLETE_ALL_KEYWORDS = [
     r"\bmarqu[ea]\s+todas\b",
@@ -95,10 +91,6 @@ def _precisa_concluir_todas(mensagem: str) -> bool:
 
 
 def _precisa_listar_tarefas(mensagem: str) -> bool:
-    """
-    Verifica se a mensagem do usuário contém keywords que indicam
-    que ele quer uma listagem real do banco (não opinião do LLM).
-    """
     msg_lower = mensagem.lower().strip()
     for pattern in LIST_TASK_KEYWORDS:
         if re.search(pattern, msg_lower):
@@ -107,29 +99,19 @@ def _precisa_listar_tarefas(mensagem: str) -> bool:
 
 
 def _calcular_data_filtro(mensagem: str) -> str | None:
-    """
-    #1C — Calcula a data absoluta a partir de referências relativas
-    na mensagem do usuário. Não delega isso ao LLM.
-    Retorna 'YYYY-MM-DD' ou None se não encontrou referência.
-    """
     agora = datetime.now(TIMEZONE)
     msg_lower = mensagem.lower().strip()
 
-    # "hoje"
     if re.search(r"\bhoje\b", msg_lower):
         return agora.strftime("%Y-%m-%d")
 
-    # "amanhã" / "amanha"
     if re.search(r"\bamanh[aã]\b", msg_lower):
         from datetime import timedelta
-        amanha = agora + timedelta(days=1)
-        return amanha.strftime("%Y-%m-%d")
+        return (agora + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # "ontem"
     if re.search(r"\bontem\b", msg_lower):
         from datetime import timedelta
-        ontem = agora - timedelta(days=1)
-        return ontem.strftime("%Y-%m-%d")
+        return (agora - timedelta(days=1)).strftime("%Y-%m-%d")
 
     return None
 
@@ -179,7 +161,7 @@ def salvar_historico(user_id: str, role: str, content: str) -> None:
 
 
 # ============================================================
-# AUDIT LOG — #4A
+# AUDIT LOG
 # ============================================================
 
 def _log_tool_call(
@@ -190,10 +172,6 @@ def _log_tool_call(
     llm_response: str | None = None,
     validation_error: str | None = None,
 ) -> None:
-    """
-    Registra uma tool call no banco para auditoria e debugging.
-    Executa em sessão separada para não bloquear a resposta.
-    """
     db = SessionLocal()
     try:
         log_entry = ToolCallLog(
@@ -214,21 +192,13 @@ def _log_tool_call(
 
 
 # ============================================================
-# RESPONSE GROUNDING — #1B, #4C
+# RESPONSE GROUNDING
 # ============================================================
 
 def _verificar_grounding(tool_result: str, llm_response: str) -> bool:
-    """
-    Verifica se a resposta do LLM contém informações reais da tool.
-    Extrai palavras-chave do resultado da tool e verifica se aparecem
-    na resposta do LLM.
-
-    Retorna True se a resposta está fundamentada em dados reais.
-    """
     if not tool_result or not llm_response:
-        return True  # Sem dados para comparar
+        return True
 
-    # Extrai tokens significativos do resultado da tool (ignora palavras comuns)
     palavras_comuns = {
         "o", "a", "as", "os", "de", "da", "do", "das", "dos",
         "para", "por", "com", "sem", "em", "no", "na", "e", "ou",
@@ -244,50 +214,30 @@ def _verificar_grounding(tool_result: str, llm_response: str) -> bool:
             tokens_result.add(token)
 
     if not tokens_result:
-        return True  # Resultado muito curto, não há como verificar
+        return True
 
-    # Conta quantos tokens da tool aparecem na resposta do LLM
     llm_lower = llm_response.lower()
     encontrados = sum(1 for t in tokens_result if t in llm_lower)
     taxa = encontrados / len(tokens_result) if tokens_result else 0
-
-    # Se menos de 30% dos tokens-chave aparecem na resposta, suspect
     return taxa >= 0.3
 
 
-def _corrigir_resposta_sem_grounding(
-    tool_result: str, user_message: str
-) -> str:
-    """
-    Gera uma resposta fallback quando o LLM não usa os dados da tool.
-    Usa diretamente o resultado da tool como resposta.
-    """
-    # Se a tool retornou dados reais, usa diretamente
+def _corrigir_resposta_sem_grounding(tool_result: str, user_message: str) -> str:
     if tool_result and "erro" not in tool_result.lower():
         return tool_result
     return f"Sobre '{user_message}': os dados do sistema são os seguintes:\n\n{tool_result}"
 
 
 # ============================================================
-# EXECUÇÃO DE TOOLS — com validação (#4B) e audit log (#4A)
+# EXECUÇÃO DE TOOLS
 # ============================================================
 
 def executar_tool(
     nome: str, argumentos: dict, user_id: str, llm_response: str | None = None
 ) -> str:
-    """
-    Executa uma tool com validação prévia e audit log.
-
-    Fluxo:
-        1. Valida argumentos
-        2. Se inválido: loga erro e retorna mensagem de erro
-        3. Se válido: executa a tool
-        4. Registra no audit log
-    """
     argumentos = argumentos or {}
     argumentos["user_id"] = user_id
 
-    # #4B — Validação de argumentos antes de executar
     erro_validacao = _validar_argumentos(nome, argumentos)
     if erro_validacao:
         logger.warning(f"[executar_tool] Validação falhou para {nome}: {erro_validacao}")
@@ -301,7 +251,6 @@ def executar_tool(
         )
         return erro_validacao
 
-    # Executa a tool
     funcao = TOOLS_MAP.get(nome)
     if not funcao:
         msg = f"Tool '{nome}' não encontrada."
@@ -316,7 +265,6 @@ def executar_tool(
         resultado = funcao(**argumentos)
         logger.info(f"[Tool] {nome}({json.dumps(argumentos, ensure_ascii=False)})")
 
-        # #4A — Audit log
         _log_tool_call(
             user_id=user_id,
             tool_name=nome,
@@ -338,17 +286,22 @@ def executar_tool(
 
 
 # ============================================================
+# HELPERS ANTHROPIC
+# ============================================================
+
+def _extrair_texto(content: list) -> str:
+    """Extrai o texto de uma lista de content blocks da Anthropic."""
+    for block in content:
+        if hasattr(block, "type") and block.type == "text":
+            return block.text
+    return ""
+
+
+# ============================================================
 # CICLO PRINCIPAL DO AGENTE
 # ============================================================
 
 def chat(mensagem: str, user_id: str) -> str:
-    """
-    Processa uma mensagem do usuário e retorna uma resposta.
-
-    Args:
-        mensagem: Texto da mensagem do usuário.
-        user_id: Identificador do usuário.
-    """
     historico = carregar_historico(user_id)
     system_prompt = get_system_prompt(user_id)
 
@@ -364,49 +317,34 @@ def chat(mensagem: str, user_id: str) -> str:
         salvar_historico(user_id, "assistant", tool_result)
         return tool_result
 
-    # #1A — Forced tool routing: verifica se precisa listar tarefas direto do banco
-    filter_date = None
+    # Forced routing: listar tarefas direto do banco
     if _precisa_listar_tarefas(mensagem):
         filter_date = _calcular_data_filtro(mensagem)
-        logger.info(
-            f"[Forced routing] Listando tarefas direto do banco"
-            f" (filter_date={filter_date})"
-        )
+        logger.info(f"[Forced routing] Listando tarefas direto do banco (filter_date={filter_date})")
         tool_result = executar_tool(
             "list_tasks", {"filter_date": filter_date} if filter_date else {},
             user_id=user_id,
         )
 
-        # Monta contexto com resultado da tool e pede pro LLM formatar.
-        # NÃO inclui histórico — o banco é a única fonte de verdade aqui.
-        # Incluir histórico faz o LLM usar respostas anteriores como fonte,
-        # inventando tarefas que já existiam na conversa mas não no banco.
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": mensagem},
-            {
-                "role": "system",
-                "content": (
-                    f"RESULTADO DA CONSULTA AO BANCO — esta é a lista COMPLETA e REAL de tarefas. "
-                    f"Use EXATAMENTE estes dados. NÃO adicione tarefas do histórico de conversa.\n\n"
-                    f"{tool_result}\n\n"
-                    f"Formate esta informação de forma amigável. "
-                    f"NÃO invente tarefas que não estão na lista acima. "
-                    f"NÃO omita tarefas que estão na lista acima."
-                ),
-            },
-        ]
+        # Embed tool result in user message — não usa histórico para evitar alucinação
+        context = (
+            f"{mensagem}\n\n"
+            f"[DADOS DO BANCO — use EXATAMENTE estes dados, não invente nada]\n"
+            f"{tool_result}\n\n"
+            f"Formate de forma amigável. NÃO invente tarefas que não estão acima. "
+            f"NÃO omita tarefas que estão acima."
+        )
 
         try:
-            resposta_final = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                temperature=GROQ_TEMPERATURE,
-                max_tokens=GROQ_MAX_TOKENS,
+            response = anthropic_client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=ANTHROPIC_MAX_TOKENS,
+                system=system_prompt,
+                messages=[{"role": "user", "content": context}],
             )
-            resposta = resposta_final.choices[0].message.content
+            resposta = _extrair_texto(response.content)
         except Exception as e:
-            logger.error(f"[chat] Erro na chamada ao Groq (forced routing): {e}")
+            logger.error(f"[chat] Erro na chamada Anthropic (forced routing): {e}")
             resposta = _corrigir_resposta_sem_grounding(tool_result, mensagem)
 
         salvar_historico(user_id, "user", mensagem)
@@ -417,109 +355,75 @@ def chat(mensagem: str, user_id: str) -> str:
     # Caminho normal: LLM decide se usa tool
     # ========================================
     messages = [
-        {"role": "system", "content": system_prompt},
         *historico,
         {"role": "user", "content": mensagem},
     ]
 
     try:
-        # Primeira chamada — modelo decide
-        try:
-            resposta_inicial = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                tools=TOOLS_SCHEMA,
-                tool_choice="auto",
-                temperature=GROQ_TEMPERATURE,
-                max_tokens=GROQ_MAX_TOKENS,
-            )
-        except Exception as e:
-            # Erro 400 tool_use_failed: modelo gerou tool call malformada.
-            # Fallback: segunda tentativa sem tools, resposta direta.
-            logger.warning(f"[chat] Falha na chamada com tools ({e}), tentando sem tools...")
-            resposta_sem_tool = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                temperature=GROQ_TEMPERATURE,
-                max_tokens=GROQ_MAX_TOKENS,
-            )
-            resposta = resposta_sem_tool.choices[0].message.content
-            salvar_historico(user_id, "user", mensagem)
-            salvar_historico(user_id, "assistant", resposta)
-            return resposta
-
-        msg = resposta_inicial.choices[0].message
+        # Primeira chamada — modelo decide usar tool ou responder
+        response = anthropic_client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            system=system_prompt,
+            tools=TOOLS_SCHEMA,
+            messages=messages,
+        )
 
         # CAMINHO 1 — modelo quer usar tool(s)
-        if msg.tool_calls:
-            messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ],
-            })
+        if response.stop_reason == "tool_use":
+            # Adiciona resposta do assistente (com os tool_use blocks) ao histórico de mensagens
+            messages.append({"role": "assistant", "content": response.content})
 
-            # Coletar resultados das tools para grounding
             tool_results: list[str] = []
+            result_contents: list[dict] = []
+            tools_usadas: set[str] = set()
 
-            for tool_call in msg.tool_calls:
-                nome = tool_call.function.name
-                argumentos = json.loads(tool_call.function.arguments)
-                resultado = executar_tool(nome, argumentos, user_id)
-                tool_results.append(resultado)
+            for block in response.content:
+                if block.type == "tool_use":
+                    nome = block.name
+                    argumentos = dict(block.input)
+                    resultado = executar_tool(nome, argumentos, user_id)
+                    tool_results.append(resultado)
+                    tools_usadas.add(nome)
+                    result_contents.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": resultado,
+                    })
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": resultado,
-                })
+            messages.append({"role": "user", "content": result_contents})
 
-            # Segunda chamada — formula resposta com resultados
-            # Para operações de escrita, injeta instrução explícita para não inventar contexto extra
+            # Para operações de escrita, reforça no system prompt da segunda chamada
             WRITE_TOOLS = {"save_task", "create_reminder", "complete_task"}
-            tools_usadas = {tc.function.name for tc in msg.tool_calls}
+            system2 = system_prompt
             if tools_usadas & WRITE_TOOLS:
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "INSTRUÇÃO OBRIGATÓRIA: Confirme APENAS a operação acima que acabou de ser executada. "
-                        "NÃO mencione outras tarefas, lembretes ou histórico. "
-                        "NÃO invente contexto adicional. Seja direto e objetivo."
-                    ),
-                })
+                system2 += (
+                    "\n\nINSTRUÇÃO OBRIGATÓRIA PARA ESTA RESPOSTA: Confirme APENAS a operação "
+                    "acima que acabou de ser executada. NÃO mencione outras tarefas, lembretes "
+                    "ou histórico. NÃO invente contexto adicional. Seja direto e objetivo."
+                )
 
-            resposta_final = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
+            # Segunda chamada — formula resposta final
+            response2 = anthropic_client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=ANTHROPIC_MAX_TOKENS,
+                system=system2,
                 messages=messages,
-                temperature=GROQ_TEMPERATURE,
-                max_tokens=GROQ_MAX_TOKENS,
             )
-            resposta = resposta_final.choices[0].message.content
+            resposta = _extrair_texto(response2.content)
 
-            # #1B/#4C — Verifica grounding
+            # Verifica grounding
             combined_tool_result = "\n".join(tool_results)
             if not _verificar_grounding(combined_tool_result, resposta):
                 logger.warning(
-                    f"[Grounding] Resposta do LLM não corresponde aos dados da tool. "
-                    f"Tool result: {combined_tool_result[:100]}... | "
-                    f"LLM response: {resposta[:100]}..."
+                    f"[Grounding] Resposta não corresponde aos dados da tool. "
+                    f"Tool: {combined_tool_result[:100]}... | LLM: {resposta[:100]}..."
                 )
-                resposta = _corrigir_resposta_sem_grounding(
-                    combined_tool_result, mensagem
-                )
+                resposta = _corrigir_resposta_sem_grounding(combined_tool_result, mensagem)
 
         # CAMINHO 2 — resposta direta sem tools
         else:
-            resposta = msg.content
+            resposta = _extrair_texto(response.content)
 
     except Exception as e:
         import traceback

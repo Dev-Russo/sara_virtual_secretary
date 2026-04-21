@@ -1,4 +1,5 @@
 alembic==1.18.4
+anthropic
 APScheduler==3.11.2
 fastapi==0.135.3
 google-api-python-client==2.193.0
