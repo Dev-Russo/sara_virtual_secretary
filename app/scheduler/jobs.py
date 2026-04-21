@@ -188,30 +188,15 @@ async def briefing_diario(forçar_envio: bool = False):
 
 async def _enviar_briefing_vazio():
     """
-    #2C — Envia mensagem de "dia livre" para usuários ativos recentes.
-    Busca os últimos usuários que tiveram conversa no histórico.
+    Envia briefing de "dia livre" para o dono do bot via ALLOWED_CHAT_ID.
     """
-    db = SessionLocal()
-    try:
-        # Busca usuários ativos nas últimas 48h
-        limite = datetime.now(TIMEZONE) - timedelta(hours=48)
+    if not ALLOWED_CHAT_ID:
+        logger.warning("[Scheduler] ALLOWED_CHAT_ID não configurado, briefing vazio pulado.")
+        return
 
-        usuarios_ativos = (
-            db.query(ConversationHistory.user_id)
-            .filter(ConversationHistory.created_at >= limite)
-            .distinct()
-            .all()
-        )
-
-        for (user_id,) in usuarios_ativos:
-            enviado = await enviar_briefing(user_id, [])
-            if enviado:
-                logger.info(f"[Scheduler] Briefing 'dia livre' enviado para {user_id}")
-
-    except Exception as e:
-        logger.error(f"[Scheduler] Erro ao enviar briefing vazio: {e}")
-    finally:
-        db.close()
+    enviado = await enviar_briefing(ALLOWED_CHAT_ID, [])
+    if enviado:
+        logger.info(f"[Scheduler] Briefing 'dia livre' enviado para {ALLOWED_CHAT_ID}")
 
 
 async def limpar_historico_antigo():
