@@ -24,7 +24,8 @@ from app.models.reminder import Reminder
 from app.models.task import Task
 from app.models.conversation import ConversationHistory
 from app.models.processed_update import ProcessedUpdate
-from app.services.telegram import enviar_lembrete, enviar_briefing, enviar_checkin
+from app.services.telegram import enviar_lembrete, enviar_briefing, enviar_inicio_planejamento
+from app.agent.session import set_session_state
 from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
 
 logger = logging.getLogger(__name__)
@@ -241,21 +242,23 @@ async def limpar_updates_antigos():
         db.close()
 
 
-async def checkin_noturno():
+async def iniciar_planejamento():
     """
-    Envia check-in noturno para o usuário perguntando como foi o dia.
+    Inicia a sessão de planejamento noturno.
+    Seta state=planning no banco e envia a mensagem de abertura.
     Horário configurável via CHECKIN_HORA (padrão: 21:00).
     """
     if not ALLOWED_CHAT_ID:
-        logger.warning("[Scheduler] ALLOWED_CHAT_ID não configurado, check-in pulado.")
+        logger.warning("[Scheduler] ALLOWED_CHAT_ID não configurado, planejamento pulado.")
         return
 
-    logger.info(f"[Scheduler] Enviando check-in noturno para {ALLOWED_CHAT_ID}...")
-    enviado = await enviar_checkin(ALLOWED_CHAT_ID)
+    logger.info(f"[Scheduler] Iniciando sessão de planejamento para {ALLOWED_CHAT_ID}...")
+    set_session_state(ALLOWED_CHAT_ID, "planning")
+    enviado = await enviar_inicio_planejamento(ALLOWED_CHAT_ID)
     if enviado:
-        logger.info("[Scheduler] Check-in noturno enviado.")
+        logger.info("[Scheduler] Sessão de planejamento iniciada.")
     else:
-        logger.warning("[Scheduler] Falha ao enviar check-in noturno.")
+        logger.warning("[Scheduler] Falha ao enviar abertura do planejamento.")
 
 
 async def briefing_catchup():
@@ -342,12 +345,12 @@ def iniciar_scheduler(scheduler: AsyncIOScheduler):
 
     hora_checkin, minuto_checkin = map(int, CHECKIN_HORA.split(":"))
     scheduler.add_job(
-        checkin_noturno,
+        iniciar_planejamento,
         "cron",
         hour=hora_checkin,
         minute=minuto_checkin,
-        id="checkin_noturno",
-        name="Check-in noturno",
+        id="iniciar_planejamento",
+        name="Inicia sessão de planejamento noturno",
         replace_existing=True,
         timezone=TIMEZONE,
     )
@@ -366,5 +369,5 @@ def iniciar_scheduler(scheduler: AsyncIOScheduler):
 
     logger.info(
         f"[Scheduler] Jobs configurados: lembretes a cada 1min, "
-        f"briefing às {BRIEFING_HORA} (com catchup)"
+        f"briefing às {BRIEFING_HORA}, planejamento às {CHECKIN_HORA}"
     )

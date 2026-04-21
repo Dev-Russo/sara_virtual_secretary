@@ -119,50 +119,35 @@ async def enviar_lembrete(chat_id: str, mensagem: str) -> bool:
             return False
 
 
-async def enviar_checkin(chat_id: str) -> bool:
+async def enviar_inicio_planejamento(chat_id: str) -> bool:
     """
-    Envia o check-in noturno perguntando como foi o dia.
+    Abre a sessão de planejamento noturno com uma mensagem conversacional.
 
     Returns:
         True se enviado com sucesso.
     """
-    texto = (
-        "🌙 *Check-in do dia*\n\n"
-        "Como foi seu dia? Tem alguma tarefa que concluiu e quer registrar, "
-        "ou algo novo para colocar na agenda de amanhã?"
-    )
-    try:
-        await bot.send_message(chat_id=chat_id, text=texto, parse_mode="Markdown")
-        return True
-    except TelegramError as e:
-        logger.warning(f"Falha ao enviar check-in para {chat_id}: {e}")
-        try:
-            await bot.send_message(chat_id=chat_id, text=texto.replace("*", ""))
-            return True
-        except TelegramError:
-            return False
+    texto = "E aí, como foi o dia?"
+    return await enviar_mensagem(chat_id, texto)
 
 
 async def enviar_briefing(chat_id: str, tarefas: list[str]) -> bool:
     """
-    Envia o briefing diário com as tarefas do dia.
+    Envia o briefing matinal. Foca no primeiro passo, não na lista completa.
 
     Args:
         chat_id: Identificador do chat.
-        tarefas: Lista de tarefas formatadas (ex: ['09:00 - Estudar Python']).
+        tarefas: Lista de tarefas formatadas (ex: ['07:00 — academia']).
 
     Returns:
         True se o briefing foi enviado com sucesso.
     """
     if not tarefas:
-        texto = "☀️ *Briefing do Dia*\n\nNenhuma tarefa para hoje, gostaria de adicionar alguma tarefa? Por enquanto você está com o dia livre! 🎉"
+        texto = "Bom dia! Você está com o dia livre hoje. Aproveita ou me fala se quiser planejar algo."
+    elif len(tarefas) == 1:
+        texto = f"Bom dia! Hoje você tem uma coisa: {tarefas[0]}. Vai lá 💪"
     else:
-        linhas = "\n".join(f"• {t}" for t in tarefas)
-        texto = (
-            f"☀️ *Briefing do Dia*\n\n"
-            f"Você tem {len(tarefas)} tarefa(s) para hoje:\n\n"
-            f"{linhas}\n\n"
-            f"Bom trabalho! 💪"
-        )
+        lista = ", ".join(tarefas[:-1]) + f" e {tarefas[-1]}"
+        primeiro = tarefas[0].split("—")[-1].strip() if "—" in tarefas[0] else tarefas[0]
+        texto = f"Bom dia! Hoje: {lista}. Começa por {primeiro}."
 
-    return await enviar_mensagem_longa(chat_id, texto)
+    return await enviar_mensagem(chat_id, texto)

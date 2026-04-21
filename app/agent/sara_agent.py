@@ -32,10 +32,12 @@ import anthropic
 from app.agent.tools import (
     TOOLS_MAP,
     TOOLS_SCHEMA,
+    PLANNING_TOOLS_SCHEMA,
     _validar_argumentos,
     TIMEZONE,
 )
-from app.agent.prompts import get_system_prompt
+from app.agent.prompts import get_system_prompt, get_planning_prompt
+from app.agent.session import get_session_state
 from app.db.database import SessionLocal
 from app.models.conversation import ConversationHistory
 from app.models.tool_call_log import ToolCallLog
@@ -298,11 +300,89 @@ def _extrair_texto(content: list) -> str:
 
 
 # ============================================================
+# CICLO DE PLANEJAMENTO
+# ============================================================
+
+def _chat_planning(
+    mensagem: str,
+    user_id: str,
+    system_prompt: str,
+    tools_schema: list,
+    historico: list,
+) -> str:
+    """
+    Processa uma mensagem durante a sessão de planejamento noturno.
+    Sara conduz a conversa, salva tarefas e chama finalizar_planejamento ao fim.
+    """
+    messages = [
+        *historico,
+        {"role": "user", "content": mensagem},
+    ]
+
+    try:
+        response = anthropic_client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            system=system_prompt,
+            tools=tools_schema,
+            messages=messages,
+        )
+
+        if response.stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": response.content})
+
+            result_contents: list[dict] = []
+            finalizado = False
+
+            for block in response.content:
+                if block.type == "tool_use":
+                    resultado = executar_tool(block.name, dict(block.input), user_id)
+                    result_contents.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": resultado,
+                    })
+                    if block.name == "finalizar_planejamento":
+                        finalizado = True
+
+            messages.append({"role": "user", "content": result_contents})
+
+            response2 = anthropic_client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=ANTHROPIC_MAX_TOKENS,
+                system=system_prompt,
+                messages=messages,
+            )
+            resposta = _extrair_texto(response2.content)
+
+            if finalizado:
+                logger.info(f"[Planning] Sessão encerrada para {user_id}")
+        else:
+            resposta = _extrair_texto(response.content)
+
+    except Exception as e:
+        logger.error(f"[_chat_planning] Erro: {e}")
+        resposta = "Desculpe, tive um problema. Tente novamente."
+
+    salvar_historico(user_id, "user", mensagem)
+    salvar_historico(user_id, "assistant", resposta)
+    return resposta
+
+
+# ============================================================
 # CICLO PRINCIPAL DO AGENTE
 # ============================================================
 
 def chat(mensagem: str, user_id: str) -> str:
     historico = carregar_historico(user_id)
+    state = get_session_state(user_id)
+
+    # Modo planejamento: Sara conduz a conversa, tem acesso a finalizar_planejamento
+    if state == "planning":
+        system_prompt = get_planning_prompt(user_id)
+        tools_schema = PLANNING_TOOLS_SCHEMA
+        return _chat_planning(mensagem, user_id, system_prompt, tools_schema, historico)
+
     system_prompt = get_system_prompt(user_id)
 
     # Forced routing: "marcar todas como concluídas"

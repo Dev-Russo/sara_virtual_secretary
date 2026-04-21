@@ -20,6 +20,7 @@ from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.reminder import Reminder
 from app.models.tool_call_log import ToolCallLog
+from app.agent.session import set_session_state
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +347,15 @@ def complete_task(title: str, user_id: str) -> str:
         db.close()
 
 
+def finalizar_planejamento(user_id: str) -> str:
+    """
+    Encerra a sessão de planejamento e retorna o usuário ao modo normal.
+    Deve ser chamada pelo agente ao final da sessão de planejamento noturno.
+    """
+    set_session_state(user_id, "idle")
+    return "Sessão de planejamento encerrada. Boa noite!"
+
+
 # ============================================================
 # MAPA DE TOOLS
 # ============================================================
@@ -356,6 +366,7 @@ TOOLS_MAP: dict[str, callable] = {
     "list_tasks": list_tasks,
     "complete_task": complete_task,
     "complete_all_tasks": complete_all_tasks,
+    "finalizar_planejamento": finalizar_planejamento,
 }
 
 
@@ -467,3 +478,20 @@ TOOLS_SCHEMA: list[dict] = [
         }
     }
 ]
+
+FINALIZAR_PLANEJAMENTO_SCHEMA = {
+    "name": "finalizar_planejamento",
+    "description": (
+        "Encerra a sessão de planejamento noturno. "
+        "Chame SOMENTE quando o plano do dia seguinte estiver fechado e o usuário tiver confirmado, "
+        "ou quando o usuário quiser encerrar a conversa sem planejar."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+}
+
+# Tools disponíveis durante a sessão de planejamento (inclui finalizar_planejamento)
+PLANNING_TOOLS_SCHEMA = TOOLS_SCHEMA + [FINALIZAR_PLANEJAMENTO_SCHEMA]
