@@ -439,7 +439,7 @@ def chat(mensagem: str, user_id: str) -> str:
         from app.agent.session import set_session_state
         limpar_historico_planning(user_id)
         set_session_state(user_id, "planning")
-        resposta = "E aí, como foi o dia?"
+        resposta = "Como foi seu dia hoje? Me conta um pouco — isso me ajuda a planejar o próximo."
         salvar_historico(user_id, "plan_user", mensagem)
         salvar_historico(user_id, "plan_asst", resposta)
         logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")

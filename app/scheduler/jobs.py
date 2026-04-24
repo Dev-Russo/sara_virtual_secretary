@@ -27,6 +27,7 @@ from app.models.processed_update import ProcessedUpdate
 from app.services.telegram import enviar_lembrete, enviar_briefing, enviar_inicio_planejamento
 from app.agent.session import set_session_state
 from app.agent.sara_agent import limpar_historico_planning
+from app.models.tool_call_log import ToolCallLog
 from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
 
 logger = logging.getLogger(__name__)
@@ -243,14 +244,39 @@ async def limpar_updates_antigos():
         db.close()
 
 
+def _planejamento_feito_hoje(user_id: str) -> bool:
+    """Verifica se finalizar_planejamento já foi chamado hoje para este usuário."""
+    db = SessionLocal()
+    try:
+        # created_at no ToolCallLog é naive UTC — compara com início do dia em UTC
+        import pytz
+        agora_utc = datetime.utcnow()
+        inicio_dia_utc = agora_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        return db.query(ToolCallLog).filter(
+            ToolCallLog.user_id == user_id,
+            ToolCallLog.tool_name == "finalizar_planejamento",
+            ToolCallLog.created_at >= inicio_dia_utc,
+        ).first() is not None
+    except Exception as e:
+        logger.error(f"[_planejamento_feito_hoje] {e}")
+        return False
+    finally:
+        db.close()
+
+
 async def iniciar_planejamento():
     """
     Inicia a sessão de planejamento noturno.
     Seta state=planning no banco e envia a mensagem de abertura.
     Horário configurável via CHECKIN_HORA (padrão: 21:00).
+    Pula se o usuário já planejou o dia manualmente antes das 21h.
     """
     if not ALLOWED_CHAT_ID:
         logger.warning("[Scheduler] ALLOWED_CHAT_ID não configurado, planejamento pulado.")
+        return
+
+    if _planejamento_feito_hoje(ALLOWED_CHAT_ID):
+        logger.info("[Scheduler] Planejamento já realizado hoje. Sessão das 21h ignorada.")
         return
 
     logger.info(f"[Scheduler] Iniciando sessão de planejamento para {ALLOWED_CHAT_ID}...")
