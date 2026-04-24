@@ -83,6 +83,23 @@ COMPLETE_ALL_KEYWORDS = [
     r"\btodas\s+como\s+conclu",
 ]
 
+START_PLANNING_KEYWORDS = [
+    r"^/planejar$",
+    r"\bvamos\s+planejar\b",
+    r"\bquero\s+planejar\b",
+    r"\bme\s+ajuda\s+a\s+planejar\b",
+    r"\bplanej[ae]\s+meu\s+(dia|amanhã|próximo\s+dia)\b",
+    r"\binicia[r]?\s+(o\s+)?planejamento\b",
+]
+
+
+def _quer_iniciar_planejamento(mensagem: str) -> bool:
+    msg_lower = mensagem.lower().strip()
+    for pattern in START_PLANNING_KEYWORDS:
+        if re.search(pattern, msg_lower):
+            return True
+    return False
+
 
 def _precisa_concluir_todas(mensagem: str) -> bool:
     msg_lower = mensagem.lower().strip()
@@ -408,6 +425,16 @@ def chat(mensagem: str, user_id: str) -> str:
         return _chat_planning(mensagem, user_id, system_prompt, PLANNING_TOOLS_SCHEMA, historico_planning)
 
     system_prompt = get_system_prompt(user_id)
+
+    # Acionamento manual do planejamento
+    if _quer_iniciar_planejamento(mensagem):
+        from app.agent.session import set_session_state
+        set_session_state(user_id, "planning")
+        resposta = "E aí, como foi o dia?"
+        salvar_historico(user_id, "user", mensagem)
+        salvar_historico(user_id, "assistant", resposta)
+        logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")
+        return resposta
 
     # Forced routing: "marcar todas como concluídas"
     if _precisa_concluir_todas(mensagem):
