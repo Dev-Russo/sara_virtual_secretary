@@ -6,11 +6,10 @@ e retorna uma string descrevendo o resultado. Essa string volta para o modelo,
 que a usa para formular a resposta final ao usuário.
 
 Também exportamos TOOLS_SCHEMA — a descrição das tools no formato JSON que
-o Groq entende. É esse schema que o modelo lê para saber quando e como
+a Anthropic entende. É esse schema que o modelo lê para saber quando e como
 chamar cada função.
 """
 
-import json
 import logging
 from datetime import datetime
 
@@ -19,15 +18,12 @@ import pytz
 from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.reminder import Reminder
-from app.models.tool_call_log import ToolCallLog
 from app.agent.session import set_session_state
 
 logger = logging.getLogger(__name__)
 
-# Timezone centralizado — todas as datas usam este TZ
 TIMEZONE = pytz.timezone("America/Sao_Paulo")
 
-# Constantes de validação
 VALID_PRIORITIES = ("low", "medium", "high")
 MAX_TITLE_LENGTH = 500
 MAX_MESSAGE_LENGTH = 1000
@@ -38,10 +34,6 @@ MAX_MESSAGE_LENGTH = 1000
 # ============================================================
 
 def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
-    """
-    Valida os argumentos de uma tool antes de executar.
-    Retorna None se válido, ou string de erro se inválido.
-    """
     if tool_name == "save_task":
         title = argumentos.get("title", "")
         if not title or not str(title).strip():
@@ -95,7 +87,7 @@ def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
         if not title or not str(title).strip():
             return "Erro: título da tarefa não pode ser vazio."
 
-    return None  # Sem erros de validação
+    return None
 
 
 # ============================================================
@@ -103,37 +95,32 @@ def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
 # ============================================================
 
 def save_task(title: str, user_id: str, due_date: str = None, priority: str = "medium") -> str:
-    """
-    Salva uma nova tarefa no banco de dados.
-
-    Args:
-        title: Título ou descrição da tarefa.
-        user_id: Identificador do usuário.
-        due_date: Data/hora no formato 'YYYY-MM-DD HH:MM'. Opcional.
-        priority: Prioridade — 'low', 'medium' ou 'high'.
-
-    Returns:
-        String confirmando o salvamento ou descrevendo o erro.
-    """
     db = SessionLocal()
     try:
         parsed_date = None
         if due_date and isinstance(due_date, str) and due_date.strip():
             for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
                 try:
-                    parsed_naive = datetime.strptime(due_date.strip(), fmt)
-                    # #3A — Converte para timezone-aware antes de salvar
-                    parsed_date = TIMEZONE.localize(parsed_naive)
+                    parsed_date = TIMEZONE.localize(datetime.strptime(due_date.strip(), fmt))
                     break
                 except ValueError:
                     continue
+
+        existente = db.query(Task).filter(
+            Task.user_id == user_id,
+            Task.status == "pending",
+            Task.title.ilike(title.strip()),
+        ).first()
+        if existente:
+            prazo = f" para {existente.due_date.strftime('%d/%m/%Y às %H:%M')}" if existente.due_date else " sem prazo definido"
+            return f"Tarefa '{existente.title}' já existe{prazo}."
 
         task = Task(
             user_id=user_id,
             title=title,
             due_date=parsed_date,
             priority=priority,
-            status="pending"
+            status="pending",
         )
         db.add(task)
         db.commit()
@@ -151,31 +138,16 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
 
 
 def create_reminder(message: str, user_id: str, remind_at: str) -> str:
-    """
-    Cria um lembrete para ser disparado em um horário específico.
-
-    #3A — Agora salva o datetime como timezone-aware para evitar
-    mismatch com o scheduler que compara com datetime.now(TIMEZONE).
-
-    Args:
-        message: Texto do lembrete.
-        user_id: Identificador do usuário.
-        remind_at: Data/hora no formato 'YYYY-MM-DD HH:MM'.
-
-    Returns:
-        String confirmando a criação ou descrevendo o erro.
-    """
     db = SessionLocal()
     try:
         parsed_naive = datetime.strptime(remind_at.strip(), "%Y-%m-%d %H:%M")
-        # #3A — Converte para timezone-aware
         parsed_date = TIMEZONE.localize(parsed_naive)
 
         reminder = Reminder(
             user_id=user_id,
             message=message,
             remind_at=parsed_date,
-            sent=False
+            sent=False,
         )
         db.add(reminder)
         db.commit()
@@ -193,21 +165,11 @@ def create_reminder(message: str, user_id: str, remind_at: str) -> str:
 
 
 def list_tasks(user_id: str, filter_date: str = None) -> str:
-    """
-    Lista as tarefas pendentes do usuário.
-
-    Args:
-        user_id: Identificador do usuário.
-        filter_date: Filtra tarefas de uma data específica 'YYYY-MM-DD'. Opcional.
-
-    Returns:
-        String com a lista de tarefas ou mensagem de lista vazia.
-    """
     db = SessionLocal()
     try:
         query = db.query(Task).filter(
             Task.user_id == user_id,
-            Task.status == "pending"
+            Task.status == "pending",
         )
 
         if filter_date and isinstance(filter_date, str) and filter_date.strip():
@@ -220,7 +182,7 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
                     Task.due_date <= fim,
                 )
             except ValueError:
-                pass  # ignora filtro inválido
+                pass
 
         tasks = query.order_by(Task.due_date.asc().nullslast()).all()
 
@@ -234,7 +196,6 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
             if task.due_date:
                 dt = task.due_date
                 if dt.tzinfo is None:
-                    # Banco gravou em UTC sem offset — converte corretamente
                     dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
                 else:
                     dt = dt.astimezone(TIMEZONE)
@@ -254,10 +215,6 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
 
 
 def complete_all_tasks(user_id: str, filter_date: str = None) -> str:
-    """
-    Marca todas as tarefas pendentes do usuário como concluídas.
-    Se filter_date fornecido, marca apenas as tarefas daquele dia.
-    """
     db = SessionLocal()
     try:
         query = db.query(Task).filter(
@@ -299,33 +256,21 @@ def complete_all_tasks(user_id: str, filter_date: str = None) -> str:
 
 
 def complete_task(title: str, user_id: str) -> str:
-    """
-    Marca uma tarefa como concluída buscando pelo título.
-
-    Args:
-        title: Título ou trecho do título da tarefa.
-        user_id: Identificador do usuário.
-
-    Returns:
-        String confirmando a conclusão ou informando que não foi encontrada.
-    """
     db = SessionLocal()
     try:
-        # Tentativa 1 — busca direta pelo título
         task = db.query(Task).filter(
             Task.user_id == user_id,
             Task.status == "pending",
-            Task.title.ilike(f"%{title}%")
+            Task.title.ilike(f"%{title}%"),
         ).first()
 
-        # Tentativa 2 — busca por palavras individuais (resiliência a acentos corrompidos pelo LLM)
         if not task:
             palavras = [p for p in title.split() if len(p) > 3]
             for palavra in palavras:
                 task = db.query(Task).filter(
                     Task.user_id == user_id,
                     Task.status == "pending",
-                    Task.title.ilike(f"%{palavra}%")
+                    Task.title.ilike(f"%{palavra}%"),
                 ).first()
                 if task:
                     break
@@ -347,13 +292,157 @@ def complete_task(title: str, user_id: str) -> str:
         db.close()
 
 
-def finalizar_planejamento(user_id: str) -> str:
+def delete_task(title: str, user_id: str) -> str:
     """
-    Encerra a sessão de planejamento e retorna o usuário ao modo normal.
-    Deve ser chamada pelo agente ao final da sessão de planejamento noturno.
+    Deleta uma tarefa específica pelo título. Deve ser chamada APENAS após confirmação explícita.
     """
-    set_session_state(user_id, "idle")
-    return "Sessão de planejamento encerrada. Boa noite!"
+    db = SessionLocal()
+    try:
+        task = db.query(Task).filter(
+            Task.user_id == user_id,
+            Task.status == "pending",
+            Task.title.ilike(f"%{title}%"),
+        ).first()
+
+        if not task:
+            palavras = [p for p in title.split() if len(p) > 3]
+            for palavra in palavras:
+                task = db.query(Task).filter(
+                    Task.user_id == user_id,
+                    Task.status == "pending",
+                    Task.title.ilike(f"%{palavra}%"),
+                ).first()
+                if task:
+                    break
+
+        if not task:
+            return f"Nenhuma tarefa pendente encontrada com '{title}'."
+
+        titulo = task.title
+        db.delete(task)
+        db.commit()
+        return f"Tarefa '{titulo}' deletada."
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[delete_task] {e}")
+        return f"Erro ao deletar tarefa: {str(e)}"
+    finally:
+        db.close()
+
+
+def delete_all_tasks(user_id: str, filter_date: str = None) -> str:
+    """
+    Deleta tarefas pendentes do usuário. Deve ser chamada APENAS após confirmação explícita.
+    Se filter_date fornecido, deleta apenas as tarefas daquele dia.
+    Sem filter_date, deleta TODAS as tarefas pendentes do usuário.
+    """
+    db = SessionLocal()
+    try:
+        query = db.query(Task).filter(
+            Task.user_id == user_id,
+            Task.status == "pending",
+        )
+
+        if filter_date and isinstance(filter_date, str) and filter_date.strip():
+            try:
+                date = datetime.strptime(filter_date.strip(), "%Y-%m-%d")
+                inicio = TIMEZONE.localize(date.replace(hour=0, minute=0))
+                fim = TIMEZONE.localize(date.replace(hour=23, minute=59))
+                query = query.filter(
+                    Task.due_date >= inicio,
+                    Task.due_date <= fim,
+                )
+            except ValueError:
+                pass
+
+        tasks = query.all()
+
+        if not tasks:
+            return "Nenhuma tarefa pendente encontrada para deletar."
+
+        titulos = [t.title for t in tasks]
+        for task in tasks:
+            db.delete(task)
+        db.commit()
+
+        return f"{len(titulos)} tarefa(s) deletada(s): {', '.join(titulos)}"
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[delete_all_tasks] {e}")
+        return f"Erro ao deletar tarefas: {str(e)}"
+    finally:
+        db.close()
+
+
+def finalizar_planejamento(user_id: str, tarefas: list = None) -> str:
+    """
+    Encerra a sessão de planejamento e salva todas as tarefas de uma vez.
+    Recebe a lista completa de tarefas acordadas durante a conversa.
+    """
+    db = SessionLocal()
+    try:
+        salvas = []
+        ignoradas = []
+
+        for t in (tarefas or []):
+            if not isinstance(t, dict):
+                continue
+            title = str(t.get("title", "")).strip()
+            if not title:
+                continue
+
+            priority = t.get("priority", "medium")
+            if priority not in VALID_PRIORITIES:
+                priority = "medium"
+
+            due_date_str = t.get("due_date")
+            parsed_date = None
+            if due_date_str and isinstance(due_date_str, str) and due_date_str.strip():
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                    try:
+                        parsed_date = TIMEZONE.localize(
+                            datetime.strptime(due_date_str.strip(), fmt)
+                        )
+                        break
+                    except ValueError:
+                        continue
+
+            existente = db.query(Task).filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.title.ilike(title),
+            ).first()
+            if existente:
+                ignoradas.append(title)
+                continue
+
+            task = Task(
+                user_id=user_id,
+                title=title,
+                due_date=parsed_date,
+                priority=priority,
+                status="pending",
+            )
+            db.add(task)
+            salvas.append(title)
+
+        db.commit()
+        set_session_state(user_id, "idle")
+
+        if salvas:
+            return f"Planejamento finalizado! {len(salvas)} tarefa(s) salva(s): {', '.join(salvas)}"
+        if ignoradas:
+            return "Planejamento finalizado. Todas as tarefas já existiam no banco."
+        return "Sessão de planejamento encerrada."
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[finalizar_planejamento] {e}")
+        return f"Erro ao finalizar planejamento: {str(e)}"
+    finally:
+        db.close()
 
 
 # ============================================================
@@ -366,6 +455,8 @@ TOOLS_MAP: dict[str, callable] = {
     "list_tasks": list_tasks,
     "complete_task": complete_task,
     "complete_all_tasks": complete_all_tasks,
+    "delete_task": delete_task,
+    "delete_all_tasks": delete_all_tasks,
     "finalizar_planejamento": finalizar_planejamento,
 }
 
@@ -387,20 +478,20 @@ TOOLS_SCHEMA: list[dict] = [
             "properties": {
                 "title": {
                     "type": "string",
-                    "description": "Título ou descrição da tarefa."
+                    "description": "Título ou descrição da tarefa.",
                 },
                 "due_date": {
                     "type": "string",
-                    "description": "Data e hora no formato 'YYYY-MM-DD HH:MM'. Deixe null se o usuário NÃO informou data — nunca invente uma data."
+                    "description": "Data e hora no formato 'YYYY-MM-DD HH:MM'. Deixe null se o usuário NÃO informou data — nunca invente uma data.",
                 },
                 "priority": {
                     "type": "string",
                     "enum": ["low", "medium", "high"],
-                    "description": "Prioridade da tarefa."
-                }
+                    "description": "Prioridade da tarefa. Use 'medium' por padrão — só use 'high' se o usuário disser que algo é urgente ou prioritário.",
+                },
             },
-            "required": ["title"]
-        }
+            "required": ["title"],
+        },
     },
     {
         "name": "create_reminder",
@@ -413,15 +504,15 @@ TOOLS_SCHEMA: list[dict] = [
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "Texto do lembrete a ser enviado ao usuário."
+                    "description": "Texto do lembrete a ser enviado ao usuário.",
                 },
                 "remind_at": {
                     "type": "string",
-                    "description": "Data e hora exata no formato 'YYYY-MM-DD HH:MM'. SEMPRE use data absoluta (YYYY-MM-DD), nunca use datas relativas."
-                }
+                    "description": "Data e hora exata no formato 'YYYY-MM-DD HH:MM'. SEMPRE use data absoluta, nunca relativa.",
+                },
             },
-            "required": ["message", "remind_at"]
-        }
+            "required": ["message", "remind_at"],
+        },
     },
     {
         "name": "list_tasks",
@@ -435,11 +526,11 @@ TOOLS_SCHEMA: list[dict] = [
             "properties": {
                 "filter_date": {
                     "type": "string",
-                    "description": "Filtra tarefas de uma data específica no formato 'YYYY-MM-DD'. Opcional."
-                }
+                    "description": "Filtra tarefas de uma data específica no formato 'YYYY-MM-DD'. Opcional.",
+                },
             },
-            "required": []
-        }
+            "required": [],
+        },
     },
     {
         "name": "complete_all_tasks",
@@ -453,11 +544,11 @@ TOOLS_SCHEMA: list[dict] = [
             "properties": {
                 "filter_date": {
                     "type": "string",
-                    "description": "Filtra apenas tarefas de uma data específica 'YYYY-MM-DD'. Opcional."
-                }
+                    "description": "Filtra apenas tarefas de uma data específica 'YYYY-MM-DD'. Opcional.",
+                },
             },
-            "required": []
-        }
+            "required": [],
+        },
     },
     {
         "name": "complete_task",
@@ -471,27 +562,90 @@ TOOLS_SCHEMA: list[dict] = [
             "properties": {
                 "title": {
                     "type": "string",
-                    "description": "Título ou trecho do título da tarefa a ser concluída."
-                }
+                    "description": "Título ou trecho do título da tarefa a ser concluída.",
+                },
             },
-            "required": ["title"]
-        }
-    }
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "delete_task",
+        "description": (
+            "Deleta uma tarefa específica pelo título. "
+            "NUNCA chame esta tool sem antes perguntar ao usuário 'Tem certeza?' e receber confirmação explícita."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Título ou trecho do título da tarefa a ser deletada.",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "delete_all_tasks",
+        "description": (
+            "Deleta em massa tarefas pendentes do usuário. "
+            "NUNCA chame esta tool sem antes perguntar ao usuário 'Tem certeza?' e receber confirmação explícita. "
+            "Suporta filtro por data para deletar apenas tarefas de um dia específico, "
+            "ou sem filtro para deletar todas as tarefas pendentes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter_date": {
+                    "type": "string",
+                    "description": "Deleta apenas tarefas de uma data específica 'YYYY-MM-DD'. Omita para deletar todas as pendentes.",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 FINALIZAR_PLANEJAMENTO_SCHEMA = {
     "name": "finalizar_planejamento",
     "description": (
-        "Encerra a sessão de planejamento noturno. "
+        "Encerra a sessão de planejamento e salva TODAS as tarefas acordadas de uma vez. "
         "Chame SOMENTE quando o plano do dia seguinte estiver fechado e o usuário tiver confirmado, "
-        "ou quando o usuário quiser encerrar a conversa sem planejar."
+        "ou quando o usuário quiser encerrar sem planejar. "
+        "Passe a lista completa de tarefas acordadas durante a conversa no campo 'tarefas'."
     ),
     "input_schema": {
         "type": "object",
-        "properties": {},
-        "required": []
-    }
+        "properties": {
+            "tarefas": {
+                "type": "array",
+                "description": "Lista completa de tarefas acordadas durante a conversa de planejamento.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Título da tarefa.",
+                        },
+                        "due_date": {
+                            "type": "string",
+                            "description": "Data/hora no formato 'YYYY-MM-DD HH:MM'. Omita se o usuário não informou horário — nunca invente.",
+                        },
+                        "priority": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high"],
+                            "description": "Use 'medium' por padrão. Só 'high' se o usuário disse que algo é urgente.",
+                        },
+                    },
+                    "required": ["title"],
+                },
+            },
+        },
+        "required": [],
+    },
 }
 
-# Tools disponíveis durante a sessão de planejamento (inclui finalizar_planejamento)
-PLANNING_TOOLS_SCHEMA = TOOLS_SCHEMA + [FINALIZAR_PLANEJAMENTO_SCHEMA]
+# Tools disponíveis durante o planejamento: sem save_task (salvar é via finalizar_planejamento)
+PLANNING_TOOLS_SCHEMA = [
+    t for t in TOOLS_SCHEMA if t["name"] not in ("save_task", "delete_task", "delete_all_tasks")
+] + [FINALIZAR_PLANEJAMENTO_SCHEMA]

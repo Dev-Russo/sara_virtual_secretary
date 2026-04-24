@@ -127,19 +127,43 @@ def carregar_historico(user_id: str) -> list[dict]:
     try:
         registros = (
             db.query(ConversationHistory)
-            .filter(ConversationHistory.user_id == user_id)
+            .filter(
+                ConversationHistory.user_id == user_id,
+                ConversationHistory.role.in_(("user", "assistant")),
+            )
             .order_by(ConversationHistory.created_at.desc())
             .limit(10)
             .all()
         )
         registros.reverse()
-        return [
-            {"role": r.role, "content": str(r.content)}
-            for r in registros
-            if r.role in ("user", "assistant")
-        ]
+        return [{"role": r.role, "content": str(r.content)} for r in registros]
     except Exception as e:
         logger.error(f"[carregar_historico] {e}")
+        return []
+    finally:
+        db.close()
+
+
+def carregar_historico_planning(user_id: str) -> list[dict]:
+    """Carrega apenas os turnos da sessão de planejamento atual (roles plan_user/plan_asst)."""
+    db = SessionLocal()
+    try:
+        registros = (
+            db.query(ConversationHistory)
+            .filter(
+                ConversationHistory.user_id == user_id,
+                ConversationHistory.role.in_(("plan_user", "plan_asst")),
+            )
+            .order_by(ConversationHistory.created_at.desc())
+            .limit(20)
+            .all()
+        )
+        registros.reverse()
+        # Converte para roles que a Anthropic aceita
+        role_map = {"plan_user": "user", "plan_asst": "assistant"}
+        return [{"role": role_map[r.role], "content": str(r.content)} for r in registros]
+    except Exception as e:
+        logger.error(f"[carregar_historico_planning] {e}")
         return []
     finally:
         db.close()
@@ -364,8 +388,8 @@ def _chat_planning(
         logger.error(f"[_chat_planning] Erro: {e}")
         resposta = "Desculpe, tive um problema. Tente novamente."
 
-    salvar_historico(user_id, "user", mensagem)
-    salvar_historico(user_id, "assistant", resposta)
+    salvar_historico(user_id, "plan_user", mensagem)
+    salvar_historico(user_id, "plan_asst", resposta)
     return resposta
 
 
@@ -377,11 +401,11 @@ def chat(mensagem: str, user_id: str) -> str:
     historico = carregar_historico(user_id)
     state = get_session_state(user_id)
 
-    # Modo planejamento: Sara conduz a conversa, tem acesso a finalizar_planejamento
+    # Modo planejamento: usa histórico isolado para não contaminar contexto normal
     if state == "planning":
         system_prompt = get_planning_prompt(user_id)
-        tools_schema = PLANNING_TOOLS_SCHEMA
-        return _chat_planning(mensagem, user_id, system_prompt, tools_schema, historico)
+        historico_planning = carregar_historico_planning(user_id)
+        return _chat_planning(mensagem, user_id, system_prompt, PLANNING_TOOLS_SCHEMA, historico_planning)
 
     system_prompt = get_system_prompt(user_id)
 
