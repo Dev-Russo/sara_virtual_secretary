@@ -161,6 +161,22 @@ def carregar_historico(user_id: str) -> list[dict]:
         db.close()
 
 
+def limpar_historico_planning(user_id: str) -> None:
+    """Remove os turns da sessão de planejamento anterior antes de iniciar uma nova."""
+    db = SessionLocal()
+    try:
+        db.query(ConversationHistory).filter(
+            ConversationHistory.user_id == user_id,
+            ConversationHistory.role.in_(("plan_user", "plan_asst")),
+        ).delete(synchronize_session=False)
+        db.commit()
+    except Exception as e:
+        logger.error(f"[limpar_historico_planning] {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def carregar_historico_planning(user_id: str) -> list[dict]:
     """Carrega apenas os turnos da sessão de planejamento atual (roles plan_user/plan_asst)."""
     db = SessionLocal()
@@ -429,9 +445,9 @@ def chat(mensagem: str, user_id: str) -> str:
     # Acionamento manual do planejamento
     if _quer_iniciar_planejamento(mensagem):
         from app.agent.session import set_session_state
+        limpar_historico_planning(user_id)
         set_session_state(user_id, "planning")
         resposta = "E aí, como foi o dia?"
-        # Salva com roles de planejamento para que o próximo turn tenha contexto
         salvar_historico(user_id, "plan_user", mensagem)
         salvar_historico(user_id, "plan_asst", resposta)
         logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")

@@ -26,6 +26,7 @@ from app.models.conversation import ConversationHistory
 from app.models.processed_update import ProcessedUpdate
 from app.services.telegram import enviar_lembrete, enviar_briefing, enviar_inicio_planejamento
 from app.agent.session import set_session_state
+from app.agent.sara_agent import limpar_historico_planning
 from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
 
 logger = logging.getLogger(__name__)
@@ -253,6 +254,7 @@ async def iniciar_planejamento():
         return
 
     logger.info(f"[Scheduler] Iniciando sessão de planejamento para {ALLOWED_CHAT_ID}...")
+    limpar_historico_planning(ALLOWED_CHAT_ID)
     set_session_state(ALLOWED_CHAT_ID, "planning")
     enviado = await enviar_inicio_planejamento(ALLOWED_CHAT_ID)
     if enviado:
