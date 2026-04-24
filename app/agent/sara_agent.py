@@ -434,15 +434,7 @@ def chat(mensagem: str, user_id: str) -> str:
     historico = carregar_historico(user_id)
     state = get_session_state(user_id)
 
-    # Modo planejamento: usa histórico isolado para não contaminar contexto normal
-    if state == "planning":
-        system_prompt = get_planning_prompt(user_id)
-        historico_planning = carregar_historico_planning(user_id)
-        return _chat_planning(mensagem, user_id, system_prompt, PLANNING_TOOLS_SCHEMA, historico_planning)
-
-    system_prompt = get_system_prompt(user_id)
-
-    # Acionamento manual do planejamento
+    # Acionamento manual do planejamento — tem prioridade sobre qualquer estado atual
     if _quer_iniciar_planejamento(mensagem):
         from app.agent.session import set_session_state
         limpar_historico_planning(user_id)
@@ -452,6 +444,14 @@ def chat(mensagem: str, user_id: str) -> str:
         salvar_historico(user_id, "plan_asst", resposta)
         logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")
         return resposta
+
+    # Modo planejamento: usa histórico isolado para não contaminar contexto normal
+    if state == "planning":
+        system_prompt = get_planning_prompt(user_id)
+        historico_planning = carregar_historico_planning(user_id)
+        return _chat_planning(mensagem, user_id, system_prompt, PLANNING_TOOLS_SCHEMA, historico_planning)
+
+    system_prompt = get_system_prompt(user_id)
 
     # Forced routing: "marcar todas como concluídas"
     if _precisa_concluir_todas(mensagem):
