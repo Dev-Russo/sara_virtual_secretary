@@ -431,8 +431,9 @@ def chat(mensagem: str, user_id: str) -> str:
         from app.agent.session import set_session_state
         set_session_state(user_id, "planning")
         resposta = "E aí, como foi o dia?"
-        salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", resposta)
+        # Salva com roles de planejamento para que o próximo turn tenha contexto
+        salvar_historico(user_id, "plan_user", mensagem)
+        salvar_historico(user_id, "plan_asst", resposta)
         logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")
         return resposta
 

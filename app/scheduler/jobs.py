@@ -263,9 +263,9 @@ async def iniciar_planejamento():
 
 async def briefing_catchup():
     """
-    #2B — Verifica se o briefing de hoje já foi enviado.
-    Se o horário já passou e não foi enviado, dispara agora.
-    Chamado UMA VEZ no startup do scheduler.
+    Verifica se o servidor reiniciou logo após o horário do briefing e o envio foi perdido.
+    Só dispara se o restart aconteceu dentro de 2 horas após o horário do briefing —
+    evita reenviar o briefing quando o servidor reinicia no período da tarde/noite.
     """
     global briefing_catchup_done
     if briefing_catchup_done:
@@ -278,18 +278,19 @@ async def briefing_catchup():
         hour=hora_briefing, minute=min_briefing, second=0, microsecond=0
     )
 
-    # Se já passou do horário do briefing hoje, verifica se precisamos fazer catchup
-    if agora >= horario_briefing:
+    segundos_apos_briefing = (agora - horario_briefing).total_seconds()
+    janela_catchup = 2 * 3600  # 2 horas
+
+    if 0 <= segundos_apos_briefing <= janela_catchup:
         logger.info(
-            f"[Scheduler-Catchup] Horário do briefing já passou ({BRIEFING_HORA}). "
-            f"Verificando se precisa enviar..."
+            f"[Scheduler-Catchup] Restart dentro da janela do briefing "
+            f"({segundos_apos_briefing / 60:.0f}min após {BRIEFING_HORA}). Enviando catchup..."
         )
-        # Envia o briefing agora (catchup)
         await briefing_diario(forçar_envio=True)
     else:
         logger.info(
-            f"[Scheduler-Catchup] Briefing agendado para {BRIEFING_HORA}. "
-            f"Faltam {(horario_briefing - agora).total_seconds() / 60:.0f}min."
+            f"[Scheduler-Catchup] Fora da janela de catchup "
+            f"(briefing às {BRIEFING_HORA}, agora {agora.strftime('%H:%M')}). Pulando."
         )
 
 
