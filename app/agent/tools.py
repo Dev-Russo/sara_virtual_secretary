@@ -11,7 +11,7 @@ chamar cada função.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, date
 
 import pytz
 
@@ -24,9 +24,33 @@ logger = logging.getLogger(__name__)
 
 TIMEZONE = pytz.timezone("America/Sao_Paulo")
 
+# Dia lógico: antes das 04:00, ainda é "ontem" do ponto de vista do usuário
+# (ex: 00:53 de 25/04 → dia lógico = 24/04). Alinha com a percepção humana
+# de "dia" (não dormiu = ainda é hoje).
+LOGICAL_DAY_CUTOFF_HOUR = 4
+
 VALID_PRIORITIES = ("low", "medium", "high")
 MAX_TITLE_LENGTH = 500
 MAX_MESSAGE_LENGTH = 1000
+
+
+def hoje_logico(agora: datetime | None = None) -> date:
+    """Data lógica de hoje (com cutoff às 04:00)."""
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+    if agora.hour < LOGICAL_DAY_CUTOFF_HOUR:
+        return (agora - timedelta(days=1)).date()
+    return agora.date()
+
+
+def intervalo_dia_logico(agora: datetime | None = None) -> tuple[datetime, datetime]:
+    """Retorna (inicio, fim) timezone-aware do dia lógico atual."""
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+    ref = agora - timedelta(days=1) if agora.hour < LOGICAL_DAY_CUTOFF_HOUR else agora
+    inicio = ref.replace(hour=0, minute=0, second=0, microsecond=0)
+    fim = ref.replace(hour=23, minute=59, second=59, microsecond=0)
+    return inicio, fim
 
 
 # ============================================================

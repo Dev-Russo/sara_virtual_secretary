@@ -253,13 +253,13 @@ async def limpar_updates_antigos():
 
 
 def _planejamento_feito_hoje(user_id: str) -> bool:
-    """Verifica se finalizar_planejamento já foi chamado hoje para este usuário."""
+    """Verifica se finalizar_planejamento já foi chamado no dia lógico atual."""
     db = SessionLocal()
     try:
-        # created_at no ToolCallLog é naive UTC — compara com início do dia em UTC
-        import pytz
-        agora_utc = datetime.utcnow()
-        inicio_dia_utc = agora_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        from app.agent.tools import intervalo_dia_logico
+        inicio_local, _ = intervalo_dia_logico()
+        # ToolCallLog.created_at é naive UTC — converte início do dia lógico para UTC naive
+        inicio_dia_utc = inicio_local.astimezone(pytz.utc).replace(tzinfo=None)
         return db.query(ToolCallLog).filter(
             ToolCallLog.user_id == user_id,
             ToolCallLog.tool_name == "finalizar_planejamento",
@@ -272,14 +272,22 @@ def _planejamento_feito_hoje(user_id: str) -> bool:
         db.close()
 
 
-def buscar_tarefas_hoje(user_id: str) -> list:
-    """Retorna tarefas pendentes com due_date para hoje (timezone-aware)."""
+def buscar_tarefas_hoje(user_id: str, only_past: bool = False) -> list:
+    """
+    Retorna tarefas pendentes com due_date para o dia lógico atual.
+
+    Args:
+        only_past: Se True, exclui tarefas cuja hora ainda não passou. Útil para
+                   trigger manual no meio do dia (não pede pra revisar tarefa futura).
+                   Tarefas sem hora marcada (meia-noite) sempre entram.
+    """
     db = SessionLocal()
     try:
+        from app.agent.tools import intervalo_dia_logico
         agora = datetime.now(TIMEZONE)
-        inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
-        fim = agora.replace(hour=23, minute=59, second=59, microsecond=0)
-        return (
+        inicio, fim = intervalo_dia_logico(agora)
+
+        tarefas = (
             db.query(Task)
             .filter(
                 Task.user_id == user_id,
@@ -289,6 +297,24 @@ def buscar_tarefas_hoje(user_id: str) -> list:
             )
             .all()
         )
+
+        if not only_past:
+            return tarefas
+
+        def _ja_passou(t: Task) -> bool:
+            dt = t.due_date
+            if dt is None:
+                return True
+            if dt.tzinfo is None:
+                dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
+            else:
+                dt = dt.astimezone(TIMEZONE)
+            # Sem hora marcada (meia-noite) → considera que ainda vale revisar
+            if dt.hour == 0 and dt.minute == 0:
+                return True
+            return dt <= agora
+
+        return [t for t in tarefas if _ja_passou(t)]
     except Exception as e:
         logger.error(f"[buscar_tarefas_hoje] {e}")
         return []
@@ -310,7 +336,9 @@ async def iniciar_planejamento_manual(user_id: str) -> bool:
     logger.info(f"[Manual] Iniciando planejamento para {user_id}...")
     limpar_historico_planning(user_id)
 
-    tarefas_hoje = buscar_tarefas_hoje(user_id)
+    # only_past=True: no trigger manual mostra só tarefas cuja hora já passou,
+    # não faz sentido pedir revisão de algo que ainda vai acontecer.
+    tarefas_hoje = buscar_tarefas_hoje(user_id, only_past=True)
     if tarefas_hoje:
         enviado = await enviar_revisao_tarefas(user_id, tarefas_hoje)
         if enviado:

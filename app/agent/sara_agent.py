@@ -188,19 +188,20 @@ def _precisa_listar_tarefas(mensagem: str) -> bool:
 
 
 def _calcular_data_filtro(mensagem: str) -> str | None:
-    agora = datetime.now(TIMEZONE)
+    from datetime import timedelta
+    from app.agent.tools import hoje_logico
+
     msg_lower = mensagem.lower().strip()
+    hoje = hoje_logico()
 
     if re.search(r"\bhoje\b", msg_lower):
-        return agora.strftime("%Y-%m-%d")
+        return hoje.strftime("%Y-%m-%d")
 
     if re.search(r"\bamanh[aã]\b", msg_lower):
-        from datetime import timedelta
-        return (agora + timedelta(days=1)).strftime("%Y-%m-%d")
+        return (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
 
     if re.search(r"\bontem\b", msg_lower):
-        from datetime import timedelta
-        return (agora - timedelta(days=1)).strftime("%Y-%m-%d")
+        return (hoje - timedelta(days=1)).strftime("%Y-%m-%d")
 
     return None
 

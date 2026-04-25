@@ -4,11 +4,15 @@ import pytz
 
 def get_planning_prompt(user_id: str) -> str:
     from datetime import timedelta
+    from app.agent.tools import hoje_logico
     tz = pytz.timezone("America/Sao_Paulo")
     agora = datetime.now(tz)
     agora_str = agora.strftime("%d/%m/%Y %H:%M")
-    amanha = (agora + timedelta(days=1)).strftime("%Y-%m-%d")
-    amanha_display = (agora + timedelta(days=1)).strftime("%d/%m/%Y")
+    # "amanhã" = dia lógico de hoje + 1. Antes das 04:00, hoje lógico ainda é
+    # o dia anterior do calendário, então "amanhã" é o dia atual do calendário.
+    amanha_dt = hoje_logico(agora) + timedelta(days=1)
+    amanha = amanha_dt.strftime("%Y-%m-%d")
+    amanha_display = amanha_dt.strftime("%d/%m/%Y")
 
     return f"""Você é Sara, assistente pessoal. Está conduzindo a sessão de planejamento noturno do usuário.
 
