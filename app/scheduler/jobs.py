@@ -296,9 +296,30 @@ def buscar_tarefas_hoje(user_id: str) -> list:
         db.close()
 
 
+async def iniciar_planejamento_manual(user_id: str) -> None:
+    """
+    Inicia o planejamento quando acionado pelo usuário via chat (/planejar).
+    Mesma lógica do scheduler — com revisão de tarefas — mas sem verificar
+    se o planejamento já foi feito hoje.
+    """
+    logger.info(f"[Manual] Iniciando planejamento para {user_id}...")
+    limpar_historico_planning(user_id)
+
+    tarefas_hoje = buscar_tarefas_hoje(user_id)
+    if tarefas_hoje:
+        enviado = await enviar_revisao_tarefas(user_id, tarefas_hoje)
+        if enviado:
+            set_session_state(user_id, "reviewing_tasks")
+            return
+        logger.warning("[Manual] Falha ao enviar revisão, indo direto ao planejamento.")
+
+    set_session_state(user_id, "planning")
+    await enviar_inicio_planejamento(user_id)
+
+
 async def iniciar_planejamento():
     """
-    Inicia a sessão de planejamento noturno.
+    Inicia a sessão de planejamento noturno (via scheduler).
     Se houver tarefas planejadas para hoje, exibe revisão via inline keyboard
     (estado reviewing_tasks) antes de abrir a conversa de planejamento.
     Pula se o usuário já planejou o dia manualmente antes das 21h.

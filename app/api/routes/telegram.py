@@ -147,6 +147,14 @@ async def _processar_callback(data: str, chat_id: str, message_id: int, query_id
 async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
     """Processa a mensagem em background após retornar 200 ao Telegram."""
     try:
+        from app.agent.sara_agent import _quer_iniciar_planejamento, limpar_historico_planning
+        from app.scheduler.jobs import iniciar_planejamento_manual
+
+        if _quer_iniciar_planejamento(text):
+            limpar_historico_planning(chat_id)
+            await iniciar_planejamento_manual(chat_id)
+            return
+
         resposta = chat(text, user_id=chat_id)
         enviado = await enviar_mensagem_longa(chat_id, resposta)
         if not enviado:
