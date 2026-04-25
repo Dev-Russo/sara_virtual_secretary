@@ -148,9 +148,10 @@ async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
     """Processa a mensagem em background após retornar 200 ao Telegram."""
     try:
         from app.agent.sara_agent import _quer_iniciar_planejamento, limpar_historico_planning
+        from app.agent.session import get_session_state
         from app.scheduler.jobs import iniciar_planejamento_manual
 
-        if _quer_iniciar_planejamento(text):
+        if _quer_iniciar_planejamento(text) and get_session_state(chat_id) == "idle":
             limpar_historico_planning(chat_id)
             handled = await iniciar_planejamento_manual(chat_id)
             if handled:

@@ -93,10 +93,30 @@ START_PLANNING_KEYWORDS = [
 ]
 
 
+# Negação ampla — pega "não quero/vou/posso planejar/planjar/planear/planeja/programar"
 _NEGATE_PLANNING = [
-    r"\bn[aã]o\s+quero\s+planejar\b",
-    r"\bn[aã]o\s+vou\s+planejar\b",
-    r"\bn[aã]o\s+quero\s+plan(ear|ejar)\b",
+    r"\bn[aã]o\s+(quero|vou|posso|preciso|tenho)\s+(plan|prog)",
+    r"\bn[aã]o\s+(t[oô])\s+a\s+fim\s+de\s+(plan|prog)",
+]
+
+# Frases de saída/cancelamento durante planejamento ou revisão
+_EXIT_PLANNING = [
+    r"\bcancela[r]?\b",
+    r"\bdesist[oi]\b",
+    r"\bdeixa\s+(pra|para)\s+(l[aá]|depois|amanh[aã]|outra\s+hora)\b",
+    r"\bdepois\s+eu\s+(fa[çc]o|vejo|planejo)\b",
+    r"\bn[aã]o\s+(quero|vou|posso)\s+(fazer|isso|agora|nada|hoje)\b",
+    r"\bp[aá]r[ao]\s+com\s+isso\b",
+    r"\bme\s+deixa\s+em\s+paz\b",
+    r"\bagora\s+n[aã]o\b",
+]
+
+# Confirmações afirmativas curtas — usadas no safety net de "quit confirmation"
+_AFIRMATIVAS_CURTAS = [
+    r"^sim\b", r"^isso\b", r"^isso\s+mesmo\b", r"^pode\b", r"^pode\s+ser\b",
+    r"^pode\s+sim\b", r"^ok\b", r"^aham\b", r"^claro\b", r"^certo\b",
+    r"^t[aá](\s+bom)?$", r"^[ée]\s+isso\b", r"^quero\s+sim\b",
+    r"^perfeito\b", r"^bora\b", r"^vamos\b", r"^confirmo\b", r"^uhum\b",
 ]
 
 
@@ -109,6 +129,46 @@ def _quer_iniciar_planejamento(mensagem: str) -> bool:
         if re.search(pattern, msg_lower):
             return True
     return False
+
+
+def _quer_sair_planejamento(mensagem: str) -> bool:
+    """Detecta frases explícitas de cancelamento/saída do planejamento."""
+    msg_lower = mensagem.lower().strip()
+    for negate in _NEGATE_PLANNING:
+        if re.search(negate, msg_lower):
+            return True
+    for pattern in _EXIT_PLANNING:
+        if re.search(pattern, msg_lower):
+            return True
+    return False
+
+
+def _confirmou_saida(historico: list, mensagem: str) -> bool:
+    """
+    Safety net para o bug em que a IA pergunta 'tem certeza que quer encerrar?'
+    e o usuário responde 'sim', mas a IA volta a pedir o plano.
+
+    Detecta: última fala do bot mencionou encerrar/sair E msg atual é afirmação curta.
+    """
+    last_asst = None
+    for h in reversed(historico):
+        if h.get("role") == "assistant":
+            last_asst = (h.get("content") or "").lower()
+            break
+    if not last_asst:
+        return False
+
+    pediu_confirmacao_saida = any(
+        kw in last_asst for kw in (
+            "encerrar", "encerra ", "sem planejar", "sair sem", "parar por aqui",
+            "deixar pra lá", "deixar para lá",
+        )
+    )
+    if not pediu_confirmacao_saida:
+        return False
+
+    msg = mensagem.lower().strip()
+    return any(re.search(p, msg) for p in _AFIRMATIVAS_CURTAS)
 
 
 def _precisa_concluir_todas(mensagem: str) -> bool:
@@ -381,6 +441,17 @@ def _chat_planning(
     Processa uma mensagem durante a sessão de planejamento noturno.
     Sara conduz a conversa, salva tarefas e chama finalizar_planejamento ao fim.
     """
+    # Safety net — usuário confirmou que quer sair (responde "sim" depois do bot perguntar
+    # "tem certeza?"). Força finalizar_planejamento([]) sem depender da IA.
+    if _confirmou_saida(historico, mensagem):
+        from app.agent.tools import finalizar_planejamento
+        finalizar_planejamento(user_id=user_id, tarefas=[])
+        resposta = "Beleza, deixei pra lá. Bom descanso! 😊"
+        salvar_historico(user_id, "plan_user", mensagem)
+        salvar_historico(user_id, "plan_asst", resposta)
+        logger.info(f"[Planning] Saída confirmada via safety net para {user_id}.")
+        return resposta
+
     messages = [
         *historico,
         {"role": "user", "content": mensagem},
@@ -444,8 +515,9 @@ def chat(mensagem: str, user_id: str) -> str:
     historico = carregar_historico(user_id)
     state = get_session_state(user_id)
 
-    # Acionamento manual do planejamento — tem prioridade sobre qualquer estado atual
-    if _quer_iniciar_planejamento(mensagem):
+    # Acionamento manual do planejamento — só dispara se usuário está idle.
+    # Se já está em planning/reviewing_tasks, ignora (não reseta histórico).
+    if state == "idle" and _quer_iniciar_planejamento(mensagem):
         from app.agent.session import set_session_state
         limpar_historico_planning(user_id)
         set_session_state(user_id, "planning")
@@ -455,8 +527,13 @@ def chat(mensagem: str, user_id: str) -> str:
         logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")
         return resposta
 
-    # Revisão de tarefas via inline keyboard — aguarda interação pelos botões
+    # Revisão de tarefas via inline keyboard — usuário pode sair por texto
     if state == "reviewing_tasks":
+        if _quer_sair_planejamento(mensagem):
+            from app.agent.session import set_session_state
+            set_session_state(user_id, "idle")
+            logger.info(f"[Forced routing] Saída de reviewing_tasks por texto: {user_id}")
+            return "Beleza, deixei pra lá. Quando quiser, é só me chamar. 😊"
         return "Use os botões acima para marcar suas tarefas de hoje, depois toque em 'Concluir revisão' para continuar."
 
     # Modo planejamento: usa histórico isolado para não contaminar contexto normal
