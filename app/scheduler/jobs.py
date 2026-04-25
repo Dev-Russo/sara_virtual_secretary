@@ -296,11 +296,16 @@ def buscar_tarefas_hoje(user_id: str) -> list:
         db.close()
 
 
-async def iniciar_planejamento_manual(user_id: str) -> None:
+async def iniciar_planejamento_manual(user_id: str) -> bool:
     """
     Inicia o planejamento quando acionado pelo usuário via chat (/planejar).
     Mesma lógica do scheduler — com revisão de tarefas — mas sem verificar
-    se o planejamento já foi feito hoje.
+    se o planejamento já foi feito hoje e sem enviar mensagem de abertura.
+
+    Returns:
+        True  → teclado de revisão foi enviado (caller não precisa fazer mais nada).
+        False → estado setado para planning, caller deve chamar chat() normalmente
+                para que a IA responda à mensagem original de forma natural.
     """
     logger.info(f"[Manual] Iniciando planejamento para {user_id}...")
     limpar_historico_planning(user_id)
@@ -310,11 +315,11 @@ async def iniciar_planejamento_manual(user_id: str) -> None:
         enviado = await enviar_revisao_tarefas(user_id, tarefas_hoje)
         if enviado:
             set_session_state(user_id, "reviewing_tasks")
-            return
+            return True
         logger.warning("[Manual] Falha ao enviar revisão, indo direto ao planejamento.")
 
     set_session_state(user_id, "planning")
-    await enviar_inicio_planejamento(user_id)
+    return False  # caller continua com chat() para resposta natural da IA
 
 
 async def iniciar_planejamento():

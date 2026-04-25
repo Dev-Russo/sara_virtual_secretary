@@ -152,8 +152,11 @@ async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
 
         if _quer_iniciar_planejamento(text):
             limpar_historico_planning(chat_id)
-            await iniciar_planejamento_manual(chat_id)
-            return
+            handled = await iniciar_planejamento_manual(chat_id)
+            if handled:
+                return
+            # Teclado não foi enviado — continua com chat() em modo planning
+            # para a IA responder naturalmente à mensagem do usuário
 
         resposta = chat(text, user_id=chat_id)
         enviado = await enviar_mensagem_longa(chat_id, resposta)

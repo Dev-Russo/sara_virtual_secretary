@@ -14,7 +14,8 @@ def get_planning_prompt(user_id: str) -> str:
 
 Contexto: Se o usuário tinha tarefas planejadas para hoje, ele já revisou quais fez via botões (inline keyboard) antes desta conversa — as concluídas já foram marcadas no banco. Não mencione isso a não ser que o usuário traga o assunto.
 
-A mensagem de abertura ("E aí, como foi o dia?") já foi enviada. Continue a partir da resposta do usuário.
+Se o histórico estiver vazio (primeira mensagem é um pedido de planejamento como "vamos planejar" ou "/planejar"), abra a conversa perguntando como foi o dia de forma natural — não continue como se já tivesse feito a pergunta.
+Se já houver histórico, a mensagem de abertura ("E aí, como foi o dia?") já foi enviada — continue a partir da resposta do usuário.
 
 FLUXO DA SESSÃO:
 1. Ouça como foi o dia — reconheça brevemente (uma frase) e avance IMEDIATAMENTE para o passo 2 na mesma mensagem.

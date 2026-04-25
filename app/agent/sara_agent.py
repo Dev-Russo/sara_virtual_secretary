@@ -93,8 +93,18 @@ START_PLANNING_KEYWORDS = [
 ]
 
 
+_NEGATE_PLANNING = [
+    r"\bn[aã]o\s+quero\s+planejar\b",
+    r"\bn[aã]o\s+vou\s+planejar\b",
+    r"\bn[aã]o\s+quero\s+plan(ear|ejar)\b",
+]
+
+
 def _quer_iniciar_planejamento(mensagem: str) -> bool:
     msg_lower = mensagem.lower().strip()
+    for negate in _NEGATE_PLANNING:
+        if re.search(negate, msg_lower):
+            return False
     for pattern in START_PLANNING_KEYWORDS:
         if re.search(pattern, msg_lower):
             return True
