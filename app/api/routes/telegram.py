@@ -20,11 +20,21 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from groq import Groq
 
+import uuid
+
 from app.agent.sara_agent import chat
-from app.services.telegram import enviar_mensagem_longa
+from app.agent.session import set_session_state
+from app.services.telegram import (
+    enviar_mensagem_longa,
+    enviar_inicio_planejamento,
+    responder_callback,
+    editar_revisao_tarefas,
+    _revisao_state,
+)
 from app.config import ALLOWED_CHAT_ID, GROQ_API_KEY
 from app.db.database import SessionLocal
 from app.models.processed_update import ProcessedUpdate
+from app.models.task import Task
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +71,7 @@ class TelegramUpdate(BaseModel):
     update_id: int | None = None
     message: dict | None = None
     edited_message: dict | None = None
+    callback_query: dict | None = None
 
 
 async def _transcrever_audio(file_id: str) -> str | None:
@@ -95,6 +106,44 @@ async def _transcrever_audio(file_id: str) -> str | None:
         return None
 
 
+def _marcar_tarefa_done(task_id: str) -> bool:
+    """Marca uma tarefa como concluída pelo seu UUID."""
+    db = SessionLocal()
+    try:
+        from datetime import datetime as _dt
+        tarefa = db.query(Task).filter(Task.id == uuid.UUID(task_id)).first()
+        if tarefa:
+            tarefa.status = "done"
+            tarefa.updated_at = _dt.utcnow()
+            db.commit()
+            logger.info(f"[Callback] Tarefa {task_id[:8]}... marcada como concluída")
+            return True
+        return False
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[Callback] Erro ao marcar tarefa {task_id}: {e}")
+        return False
+    finally:
+        db.close()
+
+
+async def _processar_callback(data: str, chat_id: str, message_id: int, query_id: str) -> None:
+    """Processa o toque em um botão do inline keyboard de revisão de tarefas."""
+    await responder_callback(query_id)
+
+    if data.startswith("task:"):
+        task_id = data.split(":", 1)[1]
+        _marcar_tarefa_done(task_id)
+        state = _revisao_state.get(chat_id)
+        if state and task_id in state["tasks"]:
+            state["tasks"][task_id]["done"] = True
+        await editar_revisao_tarefas(chat_id, message_id)
+
+    elif data == "concluir_revisao":
+        set_session_state(chat_id, "planning")
+        await enviar_inicio_planejamento(chat_id)
+
+
 async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
     """Processa a mensagem em background após retornar 200 ao Telegram."""
     try:
@@ -121,6 +170,22 @@ async def telegram_webhook(update: TelegramUpdate, background_tasks: BackgroundT
                 logger.info(f"[Webhook] update_id {update.update_id} já processado, ignorando.")
                 return JSONResponse(status_code=200, content={"status": "duplicate"})
             _marcar_processado(update.update_id)
+
+        # Inline keyboard callback (botões da revisão de tarefas)
+        if update.callback_query:
+            cq = update.callback_query
+            cq_chat_id = str(cq.get("message", {}).get("chat", {}).get("id", ""))
+            if ALLOWED_CHAT_ID and cq_chat_id != ALLOWED_CHAT_ID:
+                logger.warning(f"[Webhook] Callback não autorizado de {cq_chat_id}")
+                return JSONResponse(status_code=200, content={"status": "unauthorized"})
+            background_tasks.add_task(
+                _processar_callback,
+                cq.get("data", ""),
+                cq_chat_id,
+                cq.get("message", {}).get("message_id", 0),
+                cq.get("id", ""),
+            )
+            return JSONResponse(status_code=200, content={"status": "ok"})
 
         message = update.message
         if not message:

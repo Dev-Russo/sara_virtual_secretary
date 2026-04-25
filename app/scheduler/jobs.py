@@ -24,7 +24,12 @@ from app.models.reminder import Reminder
 from app.models.task import Task
 from app.models.conversation import ConversationHistory
 from app.models.processed_update import ProcessedUpdate
-from app.services.telegram import enviar_lembrete, enviar_briefing, enviar_inicio_planejamento
+from app.services.telegram import (
+    enviar_lembrete,
+    enviar_briefing,
+    enviar_inicio_planejamento,
+    enviar_revisao_tarefas,
+)
 from app.agent.session import set_session_state
 from app.agent.sara_agent import limpar_historico_planning
 from app.models.tool_call_log import ToolCallLog
@@ -164,12 +169,15 @@ async def briefing_diario(forçar_envio: bool = False):
                     dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
                 else:
                     dt = dt.astimezone(TIMEZONE)
-                horario = dt.strftime("%H:%M")
                 sort_key = dt
+                if dt.hour == 0 and dt.minute == 0:
+                    linha = tarefa.title
+                else:
+                    linha = f"{dt.strftime('%H:%M')} — {tarefa.title}"
             else:
-                horario = "sem prazo"
                 sort_key = None
-            usuarios[tarefa.user_id].append((sort_key, f"{horario} — {tarefa.title}"))
+                linha = tarefa.title
+            usuarios[tarefa.user_id].append((sort_key, linha))
 
         for user_id, tarefas_raw in usuarios.items():
             # Ordena: com horário primeiro (crescente), sem prazo no final
@@ -264,11 +272,35 @@ def _planejamento_feito_hoje(user_id: str) -> bool:
         db.close()
 
 
+def buscar_tarefas_hoje(user_id: str) -> list:
+    """Retorna tarefas pendentes com due_date para hoje (timezone-aware)."""
+    db = SessionLocal()
+    try:
+        agora = datetime.now(TIMEZONE)
+        inicio = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+        fim = agora.replace(hour=23, minute=59, second=59, microsecond=0)
+        return (
+            db.query(Task)
+            .filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.due_date >= inicio,
+                Task.due_date <= fim,
+            )
+            .all()
+        )
+    except Exception as e:
+        logger.error(f"[buscar_tarefas_hoje] {e}")
+        return []
+    finally:
+        db.close()
+
+
 async def iniciar_planejamento():
     """
     Inicia a sessão de planejamento noturno.
-    Seta state=planning no banco e envia a mensagem de abertura.
-    Horário configurável via CHECKIN_HORA (padrão: 21:00).
+    Se houver tarefas planejadas para hoje, exibe revisão via inline keyboard
+    (estado reviewing_tasks) antes de abrir a conversa de planejamento.
     Pula se o usuário já planejou o dia manualmente antes das 21h.
     """
     if not ALLOWED_CHAT_ID:
@@ -281,10 +313,21 @@ async def iniciar_planejamento():
 
     logger.info(f"[Scheduler] Iniciando sessão de planejamento para {ALLOWED_CHAT_ID}...")
     limpar_historico_planning(ALLOWED_CHAT_ID)
+
+    tarefas_hoje = buscar_tarefas_hoje(ALLOWED_CHAT_ID)
+    if tarefas_hoje:
+        logger.info(f"[Scheduler] {len(tarefas_hoje)} tarefa(s) para revisar hoje.")
+        enviado = await enviar_revisao_tarefas(ALLOWED_CHAT_ID, tarefas_hoje)
+        if enviado:
+            set_session_state(ALLOWED_CHAT_ID, "reviewing_tasks")
+            logger.info("[Scheduler] Revisão de tarefas enviada, aguardando interação do usuário.")
+            return
+        logger.warning("[Scheduler] Falha ao enviar revisão, indo direto ao planejamento.")
+
     set_session_state(ALLOWED_CHAT_ID, "planning")
     enviado = await enviar_inicio_planejamento(ALLOWED_CHAT_ID)
     if enviado:
-        logger.info("[Scheduler] Sessão de planejamento iniciada.")
+        logger.info("[Scheduler] Sessão de planejamento iniciada (sem tarefas para revisar).")
     else:
         logger.warning("[Scheduler] Falha ao enviar abertura do planejamento.")
 

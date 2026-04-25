@@ -4,7 +4,7 @@ from app.models.user_session import UserSession
 
 logger = logging.getLogger(__name__)
 
-VALID_STATES = ("idle", "planning")
+VALID_STATES = ("idle", "planning", "reviewing_tasks")
 
 
 def get_session_state(user_id: str) -> str:

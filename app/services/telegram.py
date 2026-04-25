@@ -8,7 +8,7 @@ de mensagens longas.
 
 import logging
 import os
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,10 @@ if not TELEGRAM_BOT_TOKEN:
 
 # Inicializa o bot uma única vez
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+# Estado em memória da revisão de tarefas (chat_id → {message_id, tasks})
+# tasks: {task_id_str → {title, horario, done}}
+_revisao_state: dict[str, dict] = {}
 
 
 async def enviar_mensagem(chat_id: str, texto: str) -> bool:
@@ -130,24 +134,106 @@ async def enviar_inicio_planejamento(chat_id: str) -> bool:
     return await enviar_mensagem(chat_id, texto)
 
 
-async def enviar_briefing(chat_id: str, tarefas: list[str]) -> bool:
+async def enviar_revisao_tarefas(chat_id: str, tarefas: list) -> bool:
     """
-    Envia o briefing matinal. Foca no primeiro passo, não na lista completa.
+    Envia mensagem com inline keyboard para revisão das tarefas do dia.
+    Cada tarefa aparece como botão que o usuário toca para marcar como feita.
 
     Args:
         chat_id: Identificador do chat.
-        tarefas: Lista de tarefas formatadas (ex: ['07:00 — academia']).
+        tarefas: Lista de objetos Task com due_date para hoje.
+
+    Returns:
+        True se a mensagem foi enviada com sucesso.
+    """
+    import pytz as _pytz
+
+    _tz = _pytz.timezone("America/Sao_Paulo")
+    state_tasks: dict[str, dict] = {}
+    keyboard: list[list[InlineKeyboardButton]] = []
+
+    for tarefa in tarefas:
+        task_id = str(tarefa.id)
+        horario = None
+        if tarefa.due_date:
+            dt = tarefa.due_date
+            if dt.tzinfo is None:
+                dt = _pytz.utc.localize(dt).astimezone(_tz)
+            else:
+                dt = dt.astimezone(_tz)
+            if not (dt.hour == 0 and dt.minute == 0):
+                horario = dt.strftime("%H:%M")
+
+        label = f"☐ {tarefa.title}" + (f" ({horario})" if horario else "")
+        state_tasks[task_id] = {"title": tarefa.title, "horario": horario, "done": False}
+        keyboard.append([InlineKeyboardButton(text=label, callback_data=f"task:{task_id}")])
+
+    keyboard.append([InlineKeyboardButton(text="✓ Concluir revisão", callback_data="concluir_revisao")])
+
+    try:
+        msg = await bot.send_message(
+            chat_id=chat_id,
+            text="Revisão do dia — o que você fez hoje?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        _revisao_state[chat_id] = {"message_id": msg.message_id, "tasks": state_tasks}
+        return True
+    except TelegramError as e:
+        logger.error(f"Erro ao enviar revisão de tarefas para {chat_id}: {e}")
+        return False
+
+
+async def editar_revisao_tarefas(chat_id: str, message_id: int) -> bool:
+    """
+    Edita a mensagem de revisão para refletir o estado atual (☐ / ✅) de cada tarefa.
+    """
+    state = _revisao_state.get(chat_id)
+    if not state:
+        return False
+
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for task_id, info in state["tasks"].items():
+        prefix = "✅" if info["done"] else "☐"
+        label = f"{prefix} {info['title']}" + (f" ({info['horario']})" if info.get("horario") else "")
+        keyboard.append([InlineKeyboardButton(text=label, callback_data=f"task:{task_id}")])
+
+    keyboard.append([InlineKeyboardButton(text="✓ Concluir revisão", callback_data="concluir_revisao")])
+
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return True
+    except TelegramError as e:
+        logger.error(f"Erro ao editar revisão para {chat_id}: {e}")
+        return False
+
+
+async def responder_callback(callback_query_id: str) -> None:
+    """Confirma o callback query para remover o loading spinner do botão."""
+    try:
+        await bot.answer_callback_query(callback_query_id=callback_query_id)
+    except TelegramError as e:
+        logger.warning(f"Erro ao responder callback {callback_query_id}: {e}")
+
+
+async def enviar_briefing(chat_id: str, tarefas: list[str]) -> bool:
+    """
+    Envia o briefing matinal em formato de tópicos.
+
+    Args:
+        chat_id: Identificador do chat.
+        tarefas: Lista de tarefas formatadas (ex: ['07:00 — academia', 'reunião']).
 
     Returns:
         True se o briefing foi enviado com sucesso.
     """
     if not tarefas:
         texto = "Bom dia! Você está com o dia livre hoje. Aproveita ou me fala se quiser planejar algo."
-    elif len(tarefas) == 1:
-        texto = f"Bom dia! Hoje você tem uma coisa: {tarefas[0]}. Vai lá 💪"
     else:
-        lista = ", ".join(tarefas[:-1]) + f" e {tarefas[-1]}"
-        primeiro = tarefas[0].split("—")[-1].strip() if "—" in tarefas[0] else tarefas[0]
-        texto = f"Bom dia! Hoje: {lista}. Começa por {primeiro}."
+        itens = "\n".join(f"• {t}" for t in tarefas)
+        texto = f"Bom dia! Suas tarefas de hoje:\n\n{itens}"
 
     return await enviar_mensagem(chat_id, texto)

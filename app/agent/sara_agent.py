@@ -445,6 +445,10 @@ def chat(mensagem: str, user_id: str) -> str:
         logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")
         return resposta
 
+    # Revisão de tarefas via inline keyboard — aguarda interação pelos botões
+    if state == "reviewing_tasks":
+        return "Use os botões acima para marcar suas tarefas de hoje, depois toque em 'Concluir revisão' para continuar."
+
     # Modo planejamento: usa histórico isolado para não contaminar contexto normal
     if state == "planning":
         system_prompt = get_planning_prompt(user_id)
