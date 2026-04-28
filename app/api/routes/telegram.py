@@ -14,8 +14,9 @@ Suporte a áudio:
 
 import logging
 import tempfile
+from secrets import compare_digest
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from groq import Groq
@@ -31,7 +32,7 @@ from app.services.telegram import (
     editar_revisao_tarefas,
     _revisao_state,
 )
-from app.config import ALLOWED_CHAT_ID, GROQ_API_KEY
+from app.config import ALLOWED_CHAT_ID, GROQ_API_KEY, TELEGRAM_WEBHOOK_SECRET
 from app.db.database import SessionLocal
 from app.models.processed_update import ProcessedUpdate
 from app.models.task import Task
@@ -41,6 +42,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhook", tags=["telegram"])
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+
+
+def _webhook_autenticado(secret_header: str | None) -> bool:
+    """
+    Valida o secret token enviado pelo Telegram no webhook.
+
+    Se TELEGRAM_WEBHOOK_SECRET não estiver configurado, mantém compatibilidade e
+    apenas registra um warning. Em produção, o correto é sempre configurar.
+    """
+    if not TELEGRAM_WEBHOOK_SECRET:
+        logger.warning(
+            "[Webhook] TELEGRAM_WEBHOOK_SECRET não configurado; endpoint aceitando requests sem validação de header."
+        )
+        return True
+
+    if not secret_header:
+        return False
+
+    return compare_digest(secret_header, TELEGRAM_WEBHOOK_SECRET)
 
 
 def _ja_processado(update_id: int) -> bool:
@@ -168,7 +188,11 @@ async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
 
 
 @router.post("/telegram")
-async def telegram_webhook(update: TelegramUpdate, background_tasks: BackgroundTasks):
+async def telegram_webhook(
+    update: TelegramUpdate,
+    background_tasks: BackgroundTasks,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+):
     """
     Recebe eventos do Telegram e despacha para o agente.
 
@@ -176,6 +200,10 @@ async def telegram_webhook(update: TelegramUpdate, background_tasks: BackgroundT
     que o Telegram considere timeout e reenvie o mesmo update.
     """
     try:
+        if not _webhook_autenticado(x_telegram_bot_api_secret_token):
+            logger.warning("[Webhook] Secret token inválido ou ausente.")
+            return JSONResponse(status_code=403, content={"status": "forbidden"})
+
         # Deduplicação por update_id — persistida no banco, sobrevive a restarts
         if update.update_id is not None:
             if _ja_processado(update.update_id):

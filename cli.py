@@ -35,10 +35,10 @@ async def _mock_answer(*args, **kwargs):
     pass
 
 
-_tg.bot.send_message = _mock_send
-_tg.bot.edit_message_reply_markup = _mock_edit
-_tg.bot.edit_message_text = _mock_edit
-_tg.bot.answer_callback_query = _mock_answer
+type(_tg.bot).send_message = _mock_send
+type(_tg.bot).edit_message_reply_markup = _mock_edit
+type(_tg.bot).edit_message_text = _mock_edit
+type(_tg.bot).answer_callback_query = _mock_answer
 
 from app.agent.sara_agent import chat
 from app.agent.session import get_session_state, set_session_state

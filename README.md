@@ -147,6 +147,20 @@ cp .env.example .env
 # Edit .env and fill in your credentials
 ```
 
+### Local CLI-first workflow
+
+For local development, keep production values on the server and use a separate env file here:
+
+```bash
+cp .env.local.example .env.local
+```
+
+Use the same API keys if you want, but point `DATABASE_URL` to your local Postgres. When running locally, export:
+
+```bash
+export ENV_FILE=.env.local
+```
+
 ### 2. Database
 
 ```bash
@@ -154,6 +168,13 @@ cp .env.example .env
 docker-compose up -d
 
 # Run migrations
+alembic upgrade head
+```
+
+With the local env file:
+
+```bash
+export ENV_FILE=.env.local
 alembic upgrade head
 ```
 
@@ -165,11 +186,14 @@ ngrok http 8000
 
 # Copy the ngrok URL (e.g., https://abc123.ngrok-free.app)
 # Add it to .env: WEBHOOK_URL=https://abc123.ngrok-free.app
+# Also set a random secret in .env: TELEGRAM_WEBHOOK_SECRET=change-me
+# Example:
+# export TELEGRAM_WEBHOOK_SECRET="$(openssl rand -hex 32)"
 
 # Terminal 2: Register webhook with Telegram
 curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://abc123.ngrok-free.app/webhook/telegram"}'
+  -d '{"url": "https://abc123.ngrok-free.app/webhook/telegram", "secret_token": "'"${TELEGRAM_WEBHOOK_SECRET}"'"}'
 
 # Terminal 3: Start the server
 uvicorn app.main:app --reload
@@ -180,8 +204,11 @@ Now open your Telegram bot and send a message!
 ### 4. CLI Mode (Debug)
 
 ```bash
+export ENV_FILE=.env.local
 python cli.py
 ```
+
+This is the safest local path for now: same agent code, same LLM credentials if desired, but no local webhook and no shared production database.
 
 ---
 
@@ -221,6 +248,7 @@ The Sara agent has access to the following tools, automatically invoked by the L
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Telegram bot token from BotFather |
+| `TELEGRAM_WEBHOOK_SECRET` | Yes (webhook) | — | Shared secret validated from `X-Telegram-Bot-Api-Secret-Token` |
 | `GROQ_API_KEY` | Yes | — | Groq API key |
 | `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | LLM model to use |
 | `GROQ_TEMPERATURE` | No | `0.3` | Model creativity (0.0–1.0) |
@@ -304,7 +332,8 @@ Stores conversation context for multi-turn understanding.
 
 ### Webhook not receiving messages
 - Verify ngrok is running and URL matches `WEBHOOK_URL` in `.env`
-- Re-register webhook: `curl -X POST "https://api.telegram.org/bot${TOKEN}/setWebhook" -H "Content-Type: application/json" -d '{"url": "<ngrok-url>/webhook/telegram"}'`
+- Verify `TELEGRAM_WEBHOOK_SECRET` is set in the app and registered in Telegram
+- Re-register webhook: `curl -X POST "https://api.telegram.org/bot${TOKEN}/setWebhook" -H "Content-Type: application/json" -d '{"url": "<ngrok-url>/webhook/telegram", "secret_token": "'"${TELEGRAM_WEBHOOK_SECRET}"'"}'`
 - Check FastAPI logs for incoming requests
 
 ### Scheduler not sending reminders
