@@ -13,7 +13,9 @@ Correções aplicadas:
 """
 
 import logging
-from datetime import datetime, timedelta
+import re
+import uuid
+from datetime import datetime, timedelta, date
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -28,9 +30,12 @@ from app.services.telegram import (
     enviar_lembrete,
     enviar_briefing,
     enviar_inicio_planejamento,
+    enviar_pergunta_data_planejamento,
     enviar_revisao_tarefas,
+    enviar_inicio_tratamento_pendencias,
+    enviar_pergunta_pendencia,
 )
-from app.agent.session import set_session_state
+from app.agent.session import set_session_state, get_session_context
 from app.agent.sara_agent import limpar_historico_planning
 from app.models.tool_call_log import ToolCallLog
 from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
@@ -41,6 +46,156 @@ TIMEZONE = pytz.timezone("America/Sao_Paulo")
 
 # Flag para controlar se o catchup do briefing já rodou
 briefing_catchup_done = False
+
+
+def _amanha_logico_iso(agora: datetime | None = None) -> str:
+    from app.agent.tools import hoje_logico
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+    return (hoje_logico(agora) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _checkin_alcancado(agora: datetime | None = None) -> bool:
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+    hora, minuto = map(int, CHECKIN_HORA.split(":"))
+    corte = agora.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+    return agora >= corte
+
+
+def _parse_data_explicita(mensagem: str, agora: datetime | None = None) -> str | None:
+    if not mensagem:
+        return None
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+
+    msg = mensagem.lower().strip()
+    if re.search(r"\bdepois de amanh[aã]\b", msg):
+        return (agora.date() + timedelta(days=2)).strftime("%Y-%m-%d")
+    if re.search(r"\bamanh[aã]\b", msg):
+        return (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+    if re.search(r"\bhoje\b", msg):
+        return agora.date().strftime("%Y-%m-%d")
+
+    match_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", msg)
+    if match_iso:
+        try:
+            return datetime.strptime(match_iso.group(1), "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    match_br = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b", msg)
+    if match_br:
+        dia = int(match_br.group(1))
+        mes = int(match_br.group(2))
+        ano = int(match_br.group(3) or agora.year)
+        try:
+            parsed = date(ano, mes, dia)
+            if match_br.group(3) is None and parsed < agora.date():
+                parsed = date(ano + 1, mes, dia)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    return None
+
+
+def resolver_data_alvo_manual(mensagem: str, agora: datetime | None = None) -> str | None:
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+    data_explicita = _parse_data_explicita(mensagem, agora)
+    if data_explicita:
+        return data_explicita
+    if _checkin_alcancado(agora):
+        return _amanha_logico_iso(agora)
+    return None
+
+
+def _buscar_tarefas_por_ids(user_id: str, task_ids: list[str]) -> list[Task]:
+    if not task_ids:
+        return []
+    uuids: list[uuid.UUID] = []
+    for task_id in task_ids:
+        try:
+            uuids.append(uuid.UUID(str(task_id)))
+        except ValueError:
+            continue
+
+    if not uuids:
+        return []
+
+    db = SessionLocal()
+    try:
+        tarefas = (
+            db.query(Task)
+            .filter(
+                Task.user_id == user_id,
+                Task.id.in_(uuids),
+                Task.status == "pending",
+            )
+            .all()
+        )
+        ordem = {str(task_id): idx for idx, task_id in enumerate(task_ids)}
+        tarefas.sort(key=lambda task: ordem.get(str(task.id), 9999))
+        return tarefas
+    finally:
+        db.close()
+
+
+async def abrir_fluxo_pos_revisao(user_id: str) -> None:
+    from app.agent.sara_agent import salvar_historico
+
+    contexto = get_session_context(user_id)
+    review_task_ids = contexto.get("review_task_ids", [])
+    target_date = contexto.get("target_date")
+    pendentes = _buscar_tarefas_por_ids(user_id, review_task_ids)
+
+    if pendentes:
+        pendencias_contexto = [
+            {"task_id": str(task.id), "title": task.title}
+            for task in pendentes
+        ]
+        set_session_state(
+            user_id,
+            "reviewing_pending_tasks",
+            context={
+                "review_done": True,
+                "pending_queue": pendencias_contexto,
+                "pending_index": 0,
+            },
+        )
+        await enviar_inicio_tratamento_pendencias(user_id)
+        await enviar_pergunta_pendencia(user_id, pendencias_contexto[0]["title"])
+        return
+
+    if target_date:
+        mensagem = (
+            f"Beleza. Agora vamos olhar {datetime.strptime(target_date, '%Y-%m-%d').strftime('%d/%m/%Y')}. "
+            "O que precisa acontecer nesse dia pra ele render?"
+        )
+        set_session_state(
+            user_id,
+            "planning",
+            context={
+                "review_done": True,
+                "remaining_pending": [],
+                "awaiting_target_date": False,
+            },
+        )
+        await enviar_inicio_planejamento(user_id, target_date)
+        salvar_historico(user_id, "plan_asst", mensagem)
+        return
+
+    set_session_state(
+        user_id,
+        "planning",
+        context={
+            "review_done": True,
+            "remaining_pending": [],
+            "awaiting_target_date": True,
+        },
+    )
+    await enviar_pergunta_data_planejamento(user_id)
 
 
 async def verificar_lembretes():
@@ -322,7 +477,7 @@ def buscar_tarefas_hoje(user_id: str, only_past: bool = False) -> list:
         db.close()
 
 
-async def iniciar_planejamento_manual(user_id: str) -> bool:
+async def iniciar_planejamento_manual(user_id: str, mensagem: str) -> bool:
     """
     Inicia o planejamento quando acionado pelo usuário via chat (/planejar).
     Mesma lógica do scheduler — com revisão de tarefas — mas sem verificar
@@ -335,19 +490,74 @@ async def iniciar_planejamento_manual(user_id: str) -> bool:
     """
     logger.info(f"[Manual] Iniciando planejamento para {user_id}...")
     limpar_historico_planning(user_id)
+    agora = datetime.now(TIMEZONE)
+    target_date = resolver_data_alvo_manual(mensagem, agora)
 
     # only_past=True: no trigger manual mostra só tarefas cuja hora já passou,
     # não faz sentido pedir revisão de algo que ainda vai acontecer.
     tarefas_hoje = buscar_tarefas_hoje(user_id, only_past=True)
     if tarefas_hoje:
+        review_task_ids = [str(task.id) for task in tarefas_hoje]
+        set_session_state(
+            user_id,
+            "reviewing_tasks",
+            context={
+                "target_date": target_date,
+                "awaiting_target_date": target_date is None,
+                "review_done": False,
+                "remaining_pending": [],
+                "review_task_ids": review_task_ids,
+                "pending_queue": [],
+                "pending_index": 0,
+            },
+            replace_context=True,
+        )
         enviado = await enviar_revisao_tarefas(user_id, tarefas_hoje)
         if enviado:
-            set_session_state(user_id, "reviewing_tasks")
             return True
         logger.warning("[Manual] Falha ao enviar revisão, indo direto ao planejamento.")
 
-    set_session_state(user_id, "planning")
-    return False  # caller continua com chat() para resposta natural da IA
+    if target_date:
+        from app.agent.sara_agent import salvar_historico
+
+        abertura = (
+            f"Beleza. Agora vamos olhar {datetime.strptime(target_date, '%Y-%m-%d').strftime('%d/%m/%Y')}. "
+            "O que precisa acontecer nesse dia pra ele render?"
+        )
+        set_session_state(
+            user_id,
+            "planning",
+            context={
+                "target_date": target_date,
+                "awaiting_target_date": False,
+                "review_done": False,
+                "remaining_pending": [],
+                "review_task_ids": [],
+                "pending_queue": [],
+                "pending_index": 0,
+            },
+            replace_context=True,
+        )
+        await enviar_inicio_planejamento(user_id, target_date)
+        salvar_historico(user_id, "plan_asst", abertura)
+        return True
+
+    set_session_state(
+        user_id,
+        "planning",
+        context={
+            "target_date": None,
+            "awaiting_target_date": True,
+            "review_done": False,
+            "remaining_pending": [],
+            "review_task_ids": [],
+            "pending_queue": [],
+            "pending_index": 0,
+        },
+        replace_context=True,
+    )
+    await enviar_pergunta_data_planejamento(user_id)
+    return True
 
 
 async def iniciar_planejamento():
@@ -367,20 +577,54 @@ async def iniciar_planejamento():
 
     logger.info(f"[Scheduler] Iniciando sessão de planejamento para {ALLOWED_CHAT_ID}...")
     limpar_historico_planning(ALLOWED_CHAT_ID)
+    target_date = _amanha_logico_iso()
 
     tarefas_hoje = buscar_tarefas_hoje(ALLOWED_CHAT_ID)
     if tarefas_hoje:
         logger.info(f"[Scheduler] {len(tarefas_hoje)} tarefa(s) para revisar hoje.")
+        set_session_state(
+            ALLOWED_CHAT_ID,
+            "reviewing_tasks",
+            context={
+                "target_date": target_date,
+                "awaiting_target_date": False,
+                "review_done": False,
+                "remaining_pending": [],
+                "review_task_ids": [str(task.id) for task in tarefas_hoje],
+                "pending_queue": [],
+                "pending_index": 0,
+            },
+            replace_context=True,
+        )
         enviado = await enviar_revisao_tarefas(ALLOWED_CHAT_ID, tarefas_hoje)
         if enviado:
-            set_session_state(ALLOWED_CHAT_ID, "reviewing_tasks")
             logger.info("[Scheduler] Revisão de tarefas enviada, aguardando interação do usuário.")
             return
         logger.warning("[Scheduler] Falha ao enviar revisão, indo direto ao planejamento.")
 
-    set_session_state(ALLOWED_CHAT_ID, "planning")
-    enviado = await enviar_inicio_planejamento(ALLOWED_CHAT_ID)
+    from app.agent.sara_agent import salvar_historico
+
+    abertura = (
+        f"Beleza. Agora vamos olhar {datetime.strptime(target_date, '%Y-%m-%d').strftime('%d/%m/%Y')}. "
+        "O que precisa acontecer nesse dia pra ele render?"
+    )
+    set_session_state(
+        ALLOWED_CHAT_ID,
+        "planning",
+        context={
+            "target_date": target_date,
+            "awaiting_target_date": False,
+            "review_done": False,
+            "remaining_pending": [],
+            "review_task_ids": [],
+            "pending_queue": [],
+            "pending_index": 0,
+        },
+        replace_context=True,
+    )
+    enviado = await enviar_inicio_planejamento(ALLOWED_CHAT_ID, target_date)
     if enviado:
+        salvar_historico(ALLOWED_CHAT_ID, "plan_asst", abertura)
         logger.info("[Scheduler] Sessão de planejamento iniciada (sem tarefas para revisar).")
     else:
         logger.warning("[Scheduler] Falha ao enviar abertura do planejamento.")

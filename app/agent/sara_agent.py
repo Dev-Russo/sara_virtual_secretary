@@ -24,7 +24,7 @@ Fluxo de uma mensagem:
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, date
 
 import pytz
 import anthropic
@@ -35,9 +35,11 @@ from app.agent.tools import (
     PLANNING_TOOLS_SCHEMA,
     _validar_argumentos,
     TIMEZONE,
+    complete_task_by_id,
+    reschedule_task,
 )
 from app.agent.prompts import get_system_prompt, get_planning_prompt
-from app.agent.session import get_session_state
+from app.agent.session import get_session_state, get_session_context, set_session_state
 from app.db.database import SessionLocal
 from app.models.conversation import ConversationHistory
 from app.models.tool_call_log import ToolCallLog
@@ -45,6 +47,7 @@ from app.config import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_MODEL,
     ANTHROPIC_MAX_TOKENS,
+    CHECKIN_HORA,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,7 +191,6 @@ def _precisa_listar_tarefas(mensagem: str) -> bool:
 
 
 def _calcular_data_filtro(mensagem: str) -> str | None:
-    from datetime import timedelta
     from app.agent.tools import hoje_logico
 
     msg_lower = mensagem.lower().strip()
@@ -204,6 +206,186 @@ def _calcular_data_filtro(mensagem: str) -> str | None:
         return (hoje - timedelta(days=1)).strftime("%Y-%m-%d")
 
     return None
+
+
+def _parse_data_explicita(mensagem: str, agora: datetime | None = None) -> str | None:
+    if not mensagem:
+        return None
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+
+    msg = mensagem.lower().strip()
+    if re.search(r"\bdepois de amanh[aã]\b", msg):
+        return (agora.date() + timedelta(days=2)).strftime("%Y-%m-%d")
+    if re.search(r"\bamanh[aã]\b", msg):
+        return (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+    if re.search(r"\bhoje\b", msg):
+        return agora.date().strftime("%Y-%m-%d")
+
+    match_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", msg)
+    if match_iso:
+        try:
+            return datetime.strptime(match_iso.group(1), "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    match_br = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b", msg)
+    if match_br:
+        dia = int(match_br.group(1))
+        mes = int(match_br.group(2))
+        ano = int(match_br.group(3) or agora.year)
+        try:
+            parsed = date(ano, mes, dia)
+            if match_br.group(3) is None and parsed < agora.date():
+                parsed = date(ano + 1, mes, dia)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    return None
+
+
+def _formatar_data_legivel(target_date: str) -> str:
+    return datetime.strptime(target_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+
+
+def _mensagem_inicio_planejamento(target_date: str) -> str:
+    return (
+        f"Beleza. Agora vamos olhar {_formatar_data_legivel(target_date)}. "
+        "O que precisa acontecer nesse dia pra ele render?"
+    )
+
+
+def _pergunta_data_planejamento() -> str:
+    return "Qual dia você quer planejar? Pode me mandar a data tipo 30/04, 2026-04-30 ou 'amanhã'."
+
+
+def _checkin_alcancado(agora: datetime | None = None) -> bool:
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+    hora, minuto = map(int, CHECKIN_HORA.split(":"))
+    corte = agora.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+    return agora >= corte
+
+
+def _resolver_acao_pendencia(mensagem: str) -> str | None:
+    msg = mensagem.lower().strip()
+    if re.search(r"\b(concluir|conclui|feito|fiz|pode concluir|marca como conclu[íi]da)\b", msg):
+        return "complete"
+    if re.search(r"\b(manter|deixa|deixar|continua|continuar|fica pendente)\b", msg):
+        return "keep"
+    if re.search(r"\b(mover|move|reagendar|reagenda|adiar|adiar pra|passa pra)\b", msg):
+        return "move"
+    return None
+
+
+def _pergunta_pendencia(titulo: str) -> str:
+    return (
+        f"Com '{titulo}', o que faz mais sentido agora? "
+        "Pode responder: concluir, manter pendente ou mover para outra data."
+    )
+
+
+def _encerrar_fluxo_pendencias(user_id: str, contexto: dict) -> str:
+    target_date = contexto.get("target_date")
+    remaining_pending = contexto.get("remaining_pending", [])
+    if target_date:
+        mensagem = _mensagem_inicio_planejamento(target_date)
+        set_session_state(
+            user_id,
+            "planning",
+            context={
+                "target_date": target_date,
+                "awaiting_target_date": False,
+                "review_done": True,
+                "remaining_pending": remaining_pending,
+                "review_task_ids": contexto.get("review_task_ids", []),
+                "pending_queue": [],
+                "pending_index": 0,
+                "awaiting_move_date_for_task_id": None,
+            },
+            replace_context=True,
+        )
+        salvar_historico(user_id, "plan_asst", mensagem)
+        return f"Certo. Pendências alinhadas. {mensagem}"
+
+    mensagem = _pergunta_data_planejamento()
+    set_session_state(
+        user_id,
+        "planning",
+        context={
+            "target_date": None,
+            "awaiting_target_date": True,
+            "review_done": True,
+            "remaining_pending": remaining_pending,
+            "review_task_ids": contexto.get("review_task_ids", []),
+            "pending_queue": [],
+            "pending_index": 0,
+            "awaiting_move_date_for_task_id": None,
+        },
+        replace_context=True,
+    )
+    return f"Certo. Pendências alinhadas. {mensagem}"
+
+
+def _tratar_pendencia_por_texto(user_id: str, mensagem: str, contexto: dict) -> str:
+    fila = contexto.get("pending_queue", [])
+    indice = int(contexto.get("pending_index", 0))
+    if indice >= len(fila):
+        return _encerrar_fluxo_pendencias(user_id, contexto)
+
+    atual = fila[indice]
+    titulo = atual.get("title", "essa tarefa")
+    task_id = atual.get("task_id")
+    awaiting_move = contexto.get("awaiting_move_date_for_task_id")
+    data_explicita = _parse_data_explicita(mensagem)
+    acao = "move" if awaiting_move == task_id and data_explicita else _resolver_acao_pendencia(mensagem)
+
+    if acao == "move" and not data_explicita:
+        set_session_state(
+            user_id,
+            "reviewing_pending_tasks",
+            context={**contexto, "awaiting_move_date_for_task_id": task_id},
+            replace_context=True,
+        )
+        return f"Fechou. Pra qual data eu movo '{titulo}'?"
+
+    if acao is None:
+        if awaiting_move == task_id and not data_explicita:
+            return f"Me manda só a nova data de '{titulo}', tipo 30/04, 2026-04-30 ou amanhã."
+        return _pergunta_pendencia(titulo)
+
+    resposta_base = ""
+    remaining_pending = list(contexto.get("remaining_pending", []))
+    if acao == "complete":
+        resposta_base = complete_task_by_id(task_id, user_id)
+    elif acao == "keep":
+        remaining_pending.append({"task_id": task_id, "title": titulo})
+        resposta_base = f"Beleza. '{titulo}' continua pendente com a data original."
+    elif acao == "move":
+        resposta_base = reschedule_task(task_id, user_id, data_explicita)
+        remaining_pending.append({"task_id": task_id, "title": titulo, "due_date": data_explicita})
+
+    proximo_indice = indice + 1
+    novo_contexto = {
+        **contexto,
+        "pending_index": proximo_indice,
+        "remaining_pending": remaining_pending,
+        "awaiting_move_date_for_task_id": None,
+    }
+
+    if proximo_indice >= len(fila):
+        encerramento = _encerrar_fluxo_pendencias(user_id, novo_contexto)
+        return f"{resposta_base}\n\n{encerramento}"
+
+    proxima = fila[proximo_indice]
+    set_session_state(
+        user_id,
+        "reviewing_pending_tasks",
+        context=novo_contexto,
+        replace_context=True,
+    )
+    return f"{resposta_base}\n\n{_pergunta_pendencia(proxima.get('title', 'essa tarefa'))}"
 
 
 # ============================================================
@@ -515,14 +697,42 @@ def _chat_planning(
 def chat(mensagem: str, user_id: str) -> str:
     historico = carregar_historico(user_id)
     state = get_session_state(user_id)
+    session_context = get_session_context(user_id)
 
     # Acionamento manual do planejamento — só dispara se usuário está idle.
     # Se já está em planning/reviewing_tasks, ignora (não reseta histórico).
     if state == "idle" and _quer_iniciar_planejamento(mensagem):
-        from app.agent.session import set_session_state
         limpar_historico_planning(user_id)
-        set_session_state(user_id, "planning")
-        resposta = "Como foi seu dia hoje? Me conta um pouco — isso me ajuda a planejar o próximo."
+        agora = datetime.now(TIMEZONE)
+        target_date = _parse_data_explicita(mensagem, agora)
+        if not target_date and _checkin_alcancado(agora):
+            target_date = (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d")
+        if target_date:
+            set_session_state(
+                user_id,
+                "planning",
+                context={
+                    "target_date": target_date,
+                    "awaiting_target_date": False,
+                    "review_done": False,
+                    "remaining_pending": [],
+                },
+                replace_context=True,
+            )
+            resposta = _mensagem_inicio_planejamento(target_date)
+        else:
+            set_session_state(
+                user_id,
+                "planning",
+                context={
+                    "target_date": None,
+                    "awaiting_target_date": True,
+                    "review_done": False,
+                    "remaining_pending": [],
+                },
+                replace_context=True,
+            )
+            resposta = _pergunta_data_planejamento()
         salvar_historico(user_id, "plan_user", mensagem)
         salvar_historico(user_id, "plan_asst", resposta)
         logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")
@@ -531,15 +741,43 @@ def chat(mensagem: str, user_id: str) -> str:
     # Revisão de tarefas via inline keyboard — usuário pode sair por texto
     if state == "reviewing_tasks":
         if _quer_sair_planejamento(mensagem):
-            from app.agent.session import set_session_state
             set_session_state(user_id, "idle")
             logger.info(f"[Forced routing] Saída de reviewing_tasks por texto: {user_id}")
             return "Beleza, deixei pra lá. Quando quiser, é só me chamar. 😊"
         return "Use os botões acima para marcar suas tarefas de hoje, depois toque em 'Concluir revisão' para continuar."
 
+    if state == "reviewing_pending_tasks":
+        if _quer_sair_planejamento(mensagem):
+            set_session_state(user_id, "idle")
+            return "Fechei por aqui. Quando quiser retomar, eu continuo com você."
+        return _tratar_pendencia_por_texto(user_id, mensagem, session_context)
+
     # Modo planejamento: usa histórico isolado para não contaminar contexto normal
     if state == "planning":
-        system_prompt = get_planning_prompt(user_id)
+        if session_context.get("awaiting_target_date"):
+            target_date = _parse_data_explicita(mensagem)
+            if not target_date:
+                return _pergunta_data_planejamento()
+            resposta = _mensagem_inicio_planejamento(target_date)
+            set_session_state(
+                user_id,
+                "planning",
+                context={**session_context, "target_date": target_date, "awaiting_target_date": False},
+                replace_context=True,
+            )
+            salvar_historico(user_id, "plan_asst", resposta)
+            return resposta
+
+        target_date = session_context.get("target_date")
+        if not target_date:
+            return _pergunta_data_planejamento()
+
+        system_prompt = get_planning_prompt(
+            user_id,
+            target_date,
+            review_done=bool(session_context.get("review_done")),
+            remaining_pending=session_context.get("remaining_pending", []),
+        )
         historico_planning = carregar_historico_planning(user_id)
         return _chat_planning(mensagem, user_id, system_prompt, PLANNING_TOOLS_SCHEMA, historico_planning)
 
@@ -634,7 +872,7 @@ def chat(mensagem: str, user_id: str) -> str:
             messages.append({"role": "user", "content": result_contents})
 
             # Para operações de escrita, reforça no system prompt da segunda chamada
-            WRITE_TOOLS = {"save_task", "create_reminder", "complete_task"}
+            WRITE_TOOLS = {"save_task", "create_reminder", "complete_task", "reschedule_task"}
             system2 = system_prompt
             if tools_usadas & WRITE_TOOLS:
                 system2 += (

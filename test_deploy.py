@@ -19,6 +19,7 @@ Uso:
 import asyncio
 import sys
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 
 import pytz
 
@@ -64,9 +65,10 @@ from sqlalchemy import text
 from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.user_session import UserSession
-from app.agent.session import get_session_state, set_session_state
-from app.agent.sara_agent import _quer_iniciar_planejamento
-from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje
+from app.agent.session import get_session_state, set_session_state, get_session_context
+from app.agent.sara_agent import _quer_iniciar_planejamento, chat
+import app.scheduler.jobs as jobs
+from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao
 from app.api.routes.telegram import _marcar_tarefa_done
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
@@ -106,6 +108,24 @@ def _cleanup():
 def _reset_capture():
     _sent_messages.clear()
     _sent_keyboards.clear()
+
+
+@contextmanager
+def _freeze_jobs_now(frozen_dt: datetime):
+    real_datetime = jobs.datetime
+
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return frozen_dt.replace(tzinfo=None)
+            return frozen_dt.astimezone(tz)
+
+    jobs.datetime = _FrozenDateTime
+    try:
+        yield
+    finally:
+        jobs.datetime = real_datetime
 
 
 # ─── Testes ───────────────────────────────────────────────────────────────
@@ -202,15 +222,19 @@ async def test_planning_com_tarefas():
     print("\n[5] Planejamento manual — com tarefas para hoje")
     _reset_capture()
 
-    agora = datetime.now(TIMEZONE)
+    agora = datetime.now(TIMEZONE).replace(hour=20, minute=30, second=0, microsecond=0)
     hoje = agora.replace(hour=14, minute=0, second=0, microsecond=0)
     _create_task("Tarefa de revisão", due_date=hoje)
 
-    handled = await iniciar_planejamento_manual(TEST_USER)
+    with _freeze_jobs_now(agora):
+        handled = await iniciar_planejamento_manual(TEST_USER, "/planejar")
     state = get_session_state(TEST_USER)
+    contexto = get_session_context(TEST_USER)
 
     check("retornou True (keyboard enviado)", handled, f"retornou: {handled}")
     check("estado → reviewing_tasks", state == "reviewing_tasks", f"estado: {state}")
+    check("target_date inferida para amanhã", contexto.get("target_date") == (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d"),
+          f"contexto: {contexto}")
     check("keyboard foi enviado", len(_sent_keyboards) == 1, f"qtd keyboards: {len(_sent_keyboards)}")
     check("nenhuma mensagem de texto automática", len(_sent_messages) == 0, f"msgs: {_sent_messages}")
 
@@ -224,23 +248,63 @@ async def test_planning_com_tarefas():
     _cleanup()
 
 
-async def test_planning_sem_tarefas():
-    print("\n[6] Planejamento manual — sem tarefas para hoje")
+async def test_planning_sem_tarefas_noite():
+    print("\n[6] Planejamento manual — sem tarefas às 20:30")
     _reset_capture()
 
-    handled = await iniciar_planejamento_manual(TEST_USER)
+    agora = datetime.now(TIMEZONE).replace(hour=20, minute=30, second=0, microsecond=0)
+    with _freeze_jobs_now(agora):
+        handled = await iniciar_planejamento_manual(TEST_USER, "/planejar")
     state = get_session_state(TEST_USER)
+    contexto = get_session_context(TEST_USER)
 
-    check("retornou False (sem keyboard)", not handled, f"retornou: {handled}")
+    check("retornou True (fluxo tratado no orquestrador)", handled, f"retornou: {handled}")
     check("estado → planning", state == "planning", f"estado: {state}")
-    check("nenhuma mensagem enviada automaticamente", len(_sent_messages) == 0, f"msgs: {_sent_messages}")
+    check("assumiu amanhã", contexto.get("target_date") == (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d"),
+          f"contexto: {contexto}")
+    check("abriu planejamento direto", any("o que precisa acontecer" in msg.lower() for msg in _sent_messages), f"msgs: {_sent_messages}")
     check("nenhum keyboard enviado", len(_sent_keyboards) == 0)
 
     _cleanup()
 
 
+async def test_planning_sem_tarefas_manha():
+    print("\n[7] Planejamento manual — sem tarefas às 10:00")
+    _reset_capture()
+
+    agora = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    with _freeze_jobs_now(agora):
+        handled = await iniciar_planejamento_manual(TEST_USER, "/planejar")
+    state = get_session_state(TEST_USER)
+    contexto = get_session_context(TEST_USER)
+
+    check("retornou True", handled, f"retornou: {handled}")
+    check("estado → planning", state == "planning", f"estado: {state}")
+    check("aguardando data alvo", bool(contexto.get("awaiting_target_date")), f"contexto: {contexto}")
+    check("perguntou qual dia planejar", any("qual dia você quer planejar" in msg.lower() for msg in _sent_messages),
+          f"msgs: {_sent_messages}")
+
+    _cleanup()
+
+
+async def test_planning_com_data_explicita():
+    print("\n[8] Planejamento manual — data explícita na mensagem")
+    _reset_capture()
+
+    agora = TIMEZONE.localize(datetime(2026, 4, 28, 10, 0))
+    with _freeze_jobs_now(agora):
+        handled = await iniciar_planejamento_manual(TEST_USER, "/planejar 30/04")
+    contexto = get_session_context(TEST_USER)
+
+    check("retornou True", handled, f"retornou: {handled}")
+    check("usou a data mencionada", contexto.get("target_date") == "2026-04-30", f"contexto: {contexto}")
+    check("não ficou esperando data", not contexto.get("awaiting_target_date"), f"contexto: {contexto}")
+
+    _cleanup()
+
+
 async def test_marcar_tarefa_done():
-    print("\n[7] Marcar tarefa como concluída via callback")
+    print("\n[9] Marcar tarefa como concluída via callback")
     task_id = _create_task("Tarefa para callback")
 
     result = _marcar_tarefa_done(task_id)
@@ -257,11 +321,67 @@ async def test_marcar_tarefa_done():
 
 
 def test_estados():
-    print("\n[8] Transições de estado")
-    for estado in ("idle", "reviewing_tasks", "planning", "idle"):
+    print("\n[10] Transições de estado")
+    for estado in ("idle", "reviewing_tasks", "reviewing_pending_tasks", "planning", "idle"):
         set_session_state(TEST_USER, estado)
         atual = get_session_state(TEST_USER)
         check(f"setar → {estado}", atual == estado, f"ficou: {atual}")
+
+    _cleanup()
+
+
+async def test_fluxo_pendencias_mover():
+    print("\n[11] Pendência — mover sem duplicar")
+    _reset_capture()
+
+    agora = datetime.now(TIMEZONE).replace(hour=20, minute=30, second=0, microsecond=0)
+    hoje = agora.replace(hour=14, minute=0, second=0, microsecond=0)
+    task_id = _create_task("Enviar relatório", due_date=hoje)
+
+    with _freeze_jobs_now(agora):
+        await iniciar_planejamento_manual(TEST_USER, "/planejar 2026-05-03")
+    await abrir_fluxo_pos_revisao(TEST_USER)
+
+    resposta = chat("mover para 2026-05-02", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefas = db.query(Task).filter(Task.user_id == TEST_USER).all()
+    tarefa = db.query(Task).filter(Task.id == task_id).first()
+    db.close()
+
+    check("entrou em revisão de pendências", "pendências alinhadas" in resposta.lower(), f"resposta: {resposta}")
+    check("não criou duplicata", len(tarefas) == 1, f"qtd: {len(tarefas)}")
+    check("manteve status pendente", tarefa is not None and tarefa.status == "pending",
+          f"status: {tarefa.status if tarefa else 'não encontrada'}")
+    check("atualizou a data da mesma tarefa", tarefa is not None and tarefa.due_date.strftime("%Y-%m-%d") == "2026-05-02",
+          f"due_date: {tarefa.due_date if tarefa else 'não encontrada'}")
+
+    _cleanup()
+
+
+async def test_fluxo_pendencias_manter():
+    print("\n[12] Pendência — manter com data original")
+    _reset_capture()
+
+    agora = datetime.now(TIMEZONE).replace(hour=20, minute=30, second=0, microsecond=0)
+    hoje = agora.replace(hour=11, minute=0, second=0, microsecond=0)
+    task_id = _create_task("Ler capítulo", due_date=hoje)
+
+    with _freeze_jobs_now(agora):
+        await iniciar_planejamento_manual(TEST_USER, "/planejar 2026-05-03")
+    await abrir_fluxo_pos_revisao(TEST_USER)
+
+    resposta = chat("manter pendente", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefa = db.query(Task).filter(Task.id == task_id).first()
+    db.close()
+
+    check("confirma manutenção", "data original" in resposta.lower(), f"resposta: {resposta}")
+    check("continua pendente", tarefa is not None and tarefa.status == "pending",
+          f"status: {tarefa.status if tarefa else 'não encontrada'}")
+    check("preservou a data original", tarefa is not None and tarefa.due_date.strftime("%Y-%m-%d %H:%M") == hoje.strftime("%Y-%m-%d %H:%M"),
+          f"due_date: {tarefa.due_date if tarefa else 'não encontrada'}")
 
     _cleanup()
 
@@ -279,9 +399,13 @@ async def main():
         test_briefing_format()
         test_buscar_tarefas_hoje()
         await test_planning_com_tarefas()
-        await test_planning_sem_tarefas()
+        await test_planning_sem_tarefas_noite()
+        await test_planning_sem_tarefas_manha()
+        await test_planning_com_data_explicita()
         await test_marcar_tarefa_done()
         test_estados()
+        await test_fluxo_pendencias_mover()
+        await test_fluxo_pendencias_manter()
     finally:
         _cleanup()
 

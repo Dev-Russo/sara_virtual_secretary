@@ -24,10 +24,8 @@ from groq import Groq
 import uuid
 
 from app.agent.sara_agent import chat
-from app.agent.session import set_session_state
 from app.services.telegram import (
     enviar_mensagem_longa,
-    enviar_inicio_planejamento,
     responder_callback,
     editar_revisao_tarefas,
     _revisao_state,
@@ -160,8 +158,9 @@ async def _processar_callback(data: str, chat_id: str, message_id: int, query_id
         await editar_revisao_tarefas(chat_id, message_id)
 
     elif data == "concluir_revisao":
-        set_session_state(chat_id, "planning")
-        await enviar_inicio_planejamento(chat_id)
+        from app.scheduler.jobs import abrir_fluxo_pos_revisao
+
+        await abrir_fluxo_pos_revisao(chat_id)
 
 
 async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
@@ -173,11 +172,9 @@ async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
 
         if _quer_iniciar_planejamento(text) and get_session_state(chat_id) == "idle":
             limpar_historico_planning(chat_id)
-            handled = await iniciar_planejamento_manual(chat_id)
+            handled = await iniciar_planejamento_manual(chat_id, text)
             if handled:
                 return
-            # Teclado não foi enviado — continua com chat() em modo planning
-            # para a IA responder naturalmente à mensagem do usuário
 
         resposta = chat(text, user_id=chat_id)
         enviado = await enviar_mensagem_longa(chat_id, resposta)

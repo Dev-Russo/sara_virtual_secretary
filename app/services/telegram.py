@@ -8,6 +8,7 @@ de mensagens longas.
 
 import logging
 import os
+from datetime import datetime
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
@@ -27,6 +28,10 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 # Estado em memória da revisão de tarefas (chat_id → {message_id, tasks})
 # tasks: {task_id_str → {title, horario, done}}
 _revisao_state: dict[str, dict] = {}
+
+
+def _formatar_data_legivel(target_date: str) -> str:
+    return datetime.strptime(target_date, "%Y-%m-%d").strftime("%d/%m/%Y")
 
 
 async def enviar_mensagem(chat_id: str, texto: str) -> bool:
@@ -123,14 +128,35 @@ async def enviar_lembrete(chat_id: str, mensagem: str) -> bool:
             return False
 
 
-async def enviar_inicio_planejamento(chat_id: str) -> bool:
+async def enviar_inicio_planejamento(chat_id: str, target_date: str) -> bool:
     """
-    Abre a sessão de planejamento noturno com uma mensagem conversacional.
+    Abre a sessão de planejamento com uma pergunta guiada.
 
     Returns:
         True se enviado com sucesso.
     """
-    texto = "E aí, como foi o dia?"
+    texto = (
+        f"Beleza. Agora vamos olhar {_formatar_data_legivel(target_date)}. "
+        f"O que precisa acontecer nesse dia pra ele render?"
+    )
+    return await enviar_mensagem(chat_id, texto)
+
+
+async def enviar_pergunta_data_planejamento(chat_id: str) -> bool:
+    texto = "Qual dia você quer planejar? Pode me mandar a data tipo 30/04, 2026-04-30 ou 'amanhã'."
+    return await enviar_mensagem(chat_id, texto)
+
+
+async def enviar_inicio_tratamento_pendencias(chat_id: str) -> bool:
+    texto = "Antes do próximo plano, vamos fechar as pendências rapidinho."
+    return await enviar_mensagem(chat_id, texto)
+
+
+async def enviar_pergunta_pendencia(chat_id: str, titulo: str) -> bool:
+    texto = (
+        f"Com '{titulo}', o que faz mais sentido agora? "
+        "Pode responder: concluir, manter pendente ou mover para outra data."
+    )
     return await enviar_mensagem(chat_id, texto)
 
 
@@ -173,7 +199,7 @@ async def enviar_revisao_tarefas(chat_id: str, tarefas: list) -> bool:
     try:
         msg = await bot.send_message(
             chat_id=chat_id,
-            text="Revisão do dia — o que você fez hoje?",
+            text="Revisão do dia. Marca o que você concluiu e depois toca em 'Concluir revisão'.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         _revisao_state[chat_id] = {"message_id": msg.message_id, "tasks": state_tasks}

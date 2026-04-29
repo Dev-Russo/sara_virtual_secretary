@@ -12,6 +12,7 @@ chamar cada função.
 
 import logging
 from datetime import datetime, timedelta, date
+import uuid
 
 import pytz
 
@@ -110,6 +111,28 @@ def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
         title = argumentos.get("title", "")
         if not title or not str(title).strip():
             return "Erro: título da tarefa não pode ser vazio."
+
+    elif tool_name == "reschedule_task":
+        task_id = argumentos.get("task_id", "")
+        if not task_id or not str(task_id).strip():
+            return "Erro: task_id é obrigatório."
+        try:
+            uuid.UUID(str(task_id))
+        except ValueError:
+            return "Erro: task_id inválido."
+
+        new_due_date = argumentos.get("new_due_date")
+        if not new_due_date:
+            return "Erro: new_due_date é obrigatório."
+
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                datetime.strptime(str(new_due_date).strip(), fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return "Erro: formato de data inválido. Use 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM'."
 
     return None
 
@@ -316,6 +339,30 @@ def complete_task(title: str, user_id: str) -> str:
         db.close()
 
 
+def complete_task_by_id(task_id: str, user_id: str) -> str:
+    db = SessionLocal()
+    try:
+        task = db.query(Task).filter(
+            Task.id == uuid.UUID(task_id),
+            Task.user_id == user_id,
+            Task.status == "pending",
+        ).first()
+
+        if not task:
+            return "Nenhuma tarefa pendente encontrada para concluir."
+
+        task.status = "done"
+        task.updated_at = datetime.now(TIMEZONE)
+        db.commit()
+        return f"Tarefa '{task.title}' marcada como concluída! ✅"
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[complete_task_by_id] {e}")
+        return f"Erro ao concluir tarefa: {str(e)}"
+    finally:
+        db.close()
+
+
 def delete_task(title: str, user_id: str) -> str:
     """
     Deleta uma tarefa específica pelo título. Deve ser chamada APENAS após confirmação explícita.
@@ -396,6 +443,55 @@ def delete_all_tasks(user_id: str, filter_date: str = None) -> str:
         db.rollback()
         logger.error(f"[delete_all_tasks] {e}")
         return f"Erro ao deletar tarefas: {str(e)}"
+    finally:
+        db.close()
+
+
+def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
+    db = SessionLocal()
+    try:
+        task = db.query(Task).filter(
+            Task.id == uuid.UUID(task_id),
+            Task.user_id == user_id,
+            Task.status == "pending",
+        ).first()
+
+        if not task:
+            return "Nenhuma tarefa pendente encontrada para reagendar."
+
+        parsed_date = None
+        used_fmt = None
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                parsed_date = datetime.strptime(new_due_date.strip(), fmt)
+                used_fmt = fmt
+                break
+            except ValueError:
+                continue
+
+        if parsed_date is None:
+            return "Formato de data inválido. Use 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM'."
+
+        if used_fmt == "%Y-%m-%d" and task.due_date:
+            atual = task.due_date
+            if atual.tzinfo is None:
+                atual = pytz.utc.localize(atual).astimezone(TIMEZONE)
+            else:
+                atual = atual.astimezone(TIMEZONE)
+            parsed_date = parsed_date.replace(hour=atual.hour, minute=atual.minute)
+
+        task.due_date = TIMEZONE.localize(parsed_date)
+        task.updated_at = datetime.now(TIMEZONE)
+        db.commit()
+
+        return (
+            f"Tarefa '{task.title}' reagendada para "
+            f"{task.due_date.astimezone(TIMEZONE).strftime('%d/%m/%Y às %H:%M')}."
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[reschedule_task] {e}")
+        return f"Erro ao reagendar tarefa: {str(e)}"
     finally:
         db.close()
 
@@ -481,6 +577,7 @@ TOOLS_MAP: dict[str, callable] = {
     "complete_all_tasks": complete_all_tasks,
     "delete_task": delete_task,
     "delete_all_tasks": delete_all_tasks,
+    "reschedule_task": reschedule_task,
     "finalizar_planejamento": finalizar_planejamento,
 }
 
@@ -626,6 +723,27 @@ TOOLS_SCHEMA: list[dict] = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "reschedule_task",
+        "description": (
+            "Reagenda uma tarefa pendente específica já existente. "
+            "Use quando a tarefa certa já foi escolhida no fluxo e só falta mover a data."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "UUID da tarefa específica que será reagendada.",
+                },
+                "new_due_date": {
+                    "type": "string",
+                    "description": "Nova data/hora absoluta no formato 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM'.",
+                },
+            },
+            "required": ["task_id", "new_due_date"],
         },
     },
 ]
