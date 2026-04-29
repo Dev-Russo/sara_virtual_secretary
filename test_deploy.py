@@ -66,10 +66,9 @@ from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.user_session import UserSession
 from app.agent.session import get_session_state, set_session_state, get_session_context
-from app.agent.sara_agent import _quer_iniciar_planejamento, chat
+from app.agent.sara_agent import _quer_iniciar_planejamento, chat, toggle_review_task, finalizar_revisao
 import app.scheduler.jobs as jobs
-from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao
-from app.api.routes.telegram import _marcar_tarefa_done
+from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao, iniciar_revisao_check
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -243,7 +242,7 @@ async def test_planning_com_tarefas():
         buttons = [btn for row in markup.inline_keyboard for btn in row]
         labels = [btn.text for btn in buttons]
         check('botão com "☐" presente', any("☐" in lb for lb in labels))
-        check('botão "Concluir revisão" presente', any("Concluir" in lb for lb in labels))
+        check('botão "Fechar revisão" presente', any("Fechar revisão" in lb for lb in labels))
 
     _cleanup()
 
@@ -303,26 +302,31 @@ async def test_planning_com_data_explicita():
     _cleanup()
 
 
-async def test_marcar_tarefa_done():
-    print("\n[9] Marcar tarefa como concluída via callback")
-    task_id = _create_task("Tarefa para callback")
+async def test_toggle_revisao():
+    print("\n[9] Toggle de tarefa na revisão")
+    _reset_capture()
+    agora = datetime.now(TIMEZONE).replace(hour=20, minute=30, second=0, microsecond=0)
+    hoje = agora.replace(hour=14, minute=0, second=0, microsecond=0)
+    task_id = _create_task("Tarefa para toggle", due_date=hoje)
 
-    result = _marcar_tarefa_done(task_id)
+    with _freeze_jobs_now(agora):
+        await iniciar_planejamento_manual(TEST_USER, "/planejar")
 
-    db = SessionLocal()
-    task = db.query(Task).filter(Task.id == task_id).first()
-    db.close()
+    marcado = toggle_review_task(TEST_USER, task_id)
+    desmarcado = toggle_review_task(TEST_USER, task_id)
+    contexto = get_session_context(TEST_USER)
 
-    check("_marcar_tarefa_done retornou True", result)
-    check("status no banco → done", task is not None and task.status == "done",
-          f"status: {task.status if task else 'não encontrado'}")
+    check("primeiro toque marca", marcado is True)
+    check("segundo toque desmarca", desmarcado is False)
+    check("estado salvo no contexto", contexto.get("review_task_status_map", {}).get(task_id) is False,
+          f"contexto: {contexto}")
 
     _cleanup()
 
 
 def test_estados():
     print("\n[10] Transições de estado")
-    for estado in ("idle", "reviewing_tasks", "reviewing_pending_tasks", "planning", "idle"):
+    for estado in ("idle", "reviewing_tasks", "review_confirming", "planning", "idle"):
         set_session_state(TEST_USER, estado)
         atual = get_session_state(TEST_USER)
         check(f"setar → {estado}", atual == estado, f"ficou: {atual}")
@@ -330,58 +334,51 @@ def test_estados():
     _cleanup()
 
 
-async def test_fluxo_pendencias_mover():
-    print("\n[11] Pendência — mover sem duplicar")
+async def test_fluxo_revisao_em_lote():
+    print("\n[11] Revisão em lote — conclui e move sem duplicar")
     _reset_capture()
 
     agora = datetime.now(TIMEZONE).replace(hour=20, minute=30, second=0, microsecond=0)
     hoje = agora.replace(hour=14, minute=0, second=0, microsecond=0)
     task_id = _create_task("Enviar relatório", due_date=hoje)
+    _create_task("Estudar", due_date=hoje)
 
     with _freeze_jobs_now(agora):
         await iniciar_planejamento_manual(TEST_USER, "/planejar 2026-05-03")
-    await abrir_fluxo_pos_revisao(TEST_USER)
-
-    resposta = chat("mover para 2026-05-02", user_id=TEST_USER)
+    resposta = chat("fiz enviar relatório, não estudei", user_id=TEST_USER)
+    resposta_final = chat("ok", user_id=TEST_USER)
 
     db = SessionLocal()
     tarefas = db.query(Task).filter(Task.user_id == TEST_USER).all()
     tarefa = db.query(Task).filter(Task.id == task_id).first()
+    estudar = db.query(Task).filter(Task.title == "Estudar", Task.user_id == TEST_USER).first()
     db.close()
 
-    check("entrou em revisão de pendências", "pendências alinhadas" in resposta.lower(), f"resposta: {resposta}")
-    check("não criou duplicata", len(tarefas) == 1, f"qtd: {len(tarefas)}")
-    check("manteve status pendente", tarefa is not None and tarefa.status == "pending",
+    check("gerou confirmação em lote", "então ficou assim" in resposta.lower(), f"resposta: {resposta}")
+    check("não criou duplicata", len(tarefas) == 2, f"qtd: {len(tarefas)}")
+    check("marcou feita a concluída", tarefa is not None and tarefa.status == "done",
           f"status: {tarefa.status if tarefa else 'não encontrada'}")
-    check("atualizou a data da mesma tarefa", tarefa is not None and tarefa.due_date.strftime("%Y-%m-%d") == "2026-05-02",
-          f"due_date: {tarefa.due_date if tarefa else 'não encontrada'}")
+    check("moveu a pendente para a data alvo", estudar is not None and estudar.due_date.strftime("%Y-%m-%d") == "2026-05-03",
+          f"due_date: {estudar.due_date if estudar else 'não encontrada'}")
+    check("seguiu para o planejamento", "o que precisa acontecer" in resposta_final.lower(), f"resposta: {resposta_final}")
 
     _cleanup()
 
 
-async def test_fluxo_pendencias_manter():
-    print("\n[12] Pendência — manter com data original")
+async def test_revisao_check():
+    print("\n[12] /check abre revisão sem planejamento")
     _reset_capture()
 
-    agora = datetime.now(TIMEZONE).replace(hour=20, minute=30, second=0, microsecond=0)
-    hoje = agora.replace(hour=11, minute=0, second=0, microsecond=0)
-    task_id = _create_task("Ler capítulo", due_date=hoje)
+    agora = datetime.now(TIMEZONE).replace(hour=12, minute=0, second=0, microsecond=0)
+    hoje = agora.replace(hour=9, minute=0, second=0, microsecond=0)
+    _create_task("Academia", due_date=hoje)
 
-    with _freeze_jobs_now(agora):
-        await iniciar_planejamento_manual(TEST_USER, "/planejar 2026-05-03")
-    await abrir_fluxo_pos_revisao(TEST_USER)
+    handled, resposta = iniciar_revisao_check(TEST_USER)
+    estado = get_session_state(TEST_USER)
 
-    resposta = chat("manter pendente", user_id=TEST_USER)
-
-    db = SessionLocal()
-    tarefa = db.query(Task).filter(Task.id == task_id).first()
-    db.close()
-
-    check("confirma manutenção", "data original" in resposta.lower(), f"resposta: {resposta}")
-    check("continua pendente", tarefa is not None and tarefa.status == "pending",
-          f"status: {tarefa.status if tarefa else 'não encontrada'}")
-    check("preservou a data original", tarefa is not None and tarefa.due_date.strftime("%Y-%m-%d %H:%M") == hoje.strftime("%Y-%m-%d %H:%M"),
-          f"due_date: {tarefa.due_date if tarefa else 'não encontrada'}")
+    check("iniciou /check", handled, f"resposta: {resposta}")
+    check("estado em revisão", estado == "reviewing_tasks", f"estado: {estado}")
+    check("mensagem com tom novo", "me diz o que foi" in resposta.lower(), f"resposta: {resposta}")
 
     _cleanup()
 
@@ -402,10 +399,10 @@ async def main():
         await test_planning_sem_tarefas_noite()
         await test_planning_sem_tarefas_manha()
         await test_planning_com_data_explicita()
-        await test_marcar_tarefa_done()
+        await test_toggle_revisao()
         test_estados()
-        await test_fluxo_pendencias_mover()
-        await test_fluxo_pendencias_manter()
+        await test_fluxo_revisao_em_lote()
+        await test_revisao_check()
     finally:
         _cleanup()
 

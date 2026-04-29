@@ -24,6 +24,8 @@ Fluxo de uma mensagem:
 import json
 import logging
 import re
+import unicodedata
+import uuid
 from datetime import datetime, timedelta, date
 
 import pytz
@@ -40,8 +42,17 @@ from app.agent.tools import (
 )
 from app.agent.prompts import get_system_prompt, get_planning_prompt
 from app.agent.session import get_session_state, get_session_context, set_session_state
+from app.agent.copy import (
+    mensagem_abertura_planejamento,
+    mensagem_cancelamento,
+    mensagem_confirmacao_revisao,
+    mensagem_pergunta_data_planejamento,
+    mensagem_revisao_aplicada,
+    mensagem_revisao_sem_match,
+)
 from app.db.database import SessionLocal
 from app.models.conversation import ConversationHistory
+from app.models.task import Task
 from app.models.tool_call_log import ToolCallLog
 from app.config import (
     ANTHROPIC_API_KEY,
@@ -92,7 +103,16 @@ START_PLANNING_KEYWORDS = [
     r"\bquero\s+planejar\b",
     r"\bme\s+ajuda\s+a\s+planejar\b",
     r"\bplanej[ae]\s+meu\s+(dia|amanhã|próximo\s+dia)\b",
+    r"\bplanejae\s+meu\s+(dia|amanhã|próximo\s+dia)\b",
     r"\binicia[r]?\s+(o\s+)?planejamento\b",
+]
+
+START_CHECK_KEYWORDS = [
+    r"^/check$",
+    r"\bquero\s+marcar\s+(algumas\s+)?atividades\b",
+    r"\bquero\s+revisar\s+minhas\s+atividades\b",
+    r"\bmarcar\s+atividades\s+feitas\b",
+    r"\brevisar\s+o\s+que\s+fiz\b",
 ]
 
 
@@ -104,6 +124,9 @@ _NEGATE_PLANNING = [
 
 # Frases de saída/cancelamento durante planejamento ou revisão
 _EXIT_PLANNING = [
+    r"\bencerrar?\b",
+    r"\bfechar?\b",
+    r"\bsair\b",
     r"\bcancela[r]?\b",
     r"\bdesist[oi]\b",
     r"\bdeixa\s+(pra|para)\s+(l[aá]|depois|amanh[aã]|outra\s+hora)\b",
@@ -129,6 +152,14 @@ def _quer_iniciar_planejamento(mensagem: str) -> bool:
         if re.search(negate, msg_lower):
             return False
     for pattern in START_PLANNING_KEYWORDS:
+        if re.search(pattern, msg_lower):
+            return True
+    return False
+
+
+def _quer_iniciar_check(mensagem: str) -> bool:
+    msg_lower = mensagem.lower().strip()
+    for pattern in START_CHECK_KEYWORDS:
         if re.search(pattern, msg_lower):
             return True
     return False
@@ -245,19 +276,12 @@ def _parse_data_explicita(mensagem: str, agora: datetime | None = None) -> str |
     return None
 
 
-def _formatar_data_legivel(target_date: str) -> str:
-    return datetime.strptime(target_date, "%Y-%m-%d").strftime("%d/%m/%Y")
-
-
 def _mensagem_inicio_planejamento(target_date: str) -> str:
-    return (
-        f"Beleza. Agora vamos olhar {_formatar_data_legivel(target_date)}. "
-        "O que precisa acontecer nesse dia pra ele render?"
-    )
+    return mensagem_abertura_planejamento(target_date)
 
 
 def _pergunta_data_planejamento() -> str:
-    return "Qual dia você quer planejar? Pode me mandar a data tipo 30/04, 2026-04-30 ou 'amanhã'."
+    return mensagem_pergunta_data_planejamento()
 
 
 def _checkin_alcancado(agora: datetime | None = None) -> bool:
@@ -268,29 +292,153 @@ def _checkin_alcancado(agora: datetime | None = None) -> bool:
     return agora >= corte
 
 
-def _resolver_acao_pendencia(mensagem: str) -> str | None:
-    msg = mensagem.lower().strip()
-    if re.search(r"\b(concluir|conclui|feito|fiz|pode concluir|marca como conclu[íi]da)\b", msg):
-        return "complete"
-    if re.search(r"\b(manter|deixa|deixar|continua|continuar|fica pendente)\b", msg):
-        return "keep"
-    if re.search(r"\b(mover|move|reagendar|reagenda|adiar|adiar pra|passa pra)\b", msg):
-        return "move"
+def _normalizar(texto: str) -> str:
+    texto = unicodedata.normalize("NFKD", texto.lower())
+    return "".join(ch for ch in texto if not unicodedata.combining(ch))
+
+
+def _frases(texto: str) -> list[str]:
+    partes = re.split(r"[,\n;]+|\se\s", _normalizar(texto))
+    return [p.strip() for p in partes if p.strip()]
+
+
+def _buscar_tarefas_revisao(user_id: str, task_ids: list[str]) -> list[Task]:
+    if not task_ids:
+        return []
+    uuids: list[uuid.UUID] = []
+    for task_id in task_ids:
+        try:
+            uuids.append(uuid.UUID(str(task_id)))
+        except ValueError:
+            continue
+
+    if not uuids:
+        return []
+
+    db = SessionLocal()
+    try:
+        tarefas = (
+            db.query(Task)
+            .filter(Task.user_id == user_id, Task.id.in_(uuids), Task.status == "pending")
+            .all()
+        )
+        ordem = {str(task_id): idx for idx, task_id in enumerate(task_ids)}
+        tarefas.sort(key=lambda task: ordem.get(str(task.id), 9999))
+        return tarefas
+    finally:
+        db.close()
+
+
+def _proxima_data_pendente(contexto: dict) -> str | None:
+    target_date = contexto.get("target_date")
+    if target_date:
+        return target_date
+    if contexto.get("review_mode") == "planning":
+        return (datetime.now(TIMEZONE).date() + timedelta(days=1)).strftime("%Y-%m-%d")
     return None
 
 
-def _pergunta_pendencia(titulo: str) -> str:
-    return (
-        f"Com '{titulo}', o que faz mais sentido agora? "
-        "Pode responder: concluir, manter pendente ou mover para outra data."
+def _is_affirmative(mensagem: str) -> bool:
+    return any(re.search(p, mensagem.lower().strip()) for p in _AFIRMATIVAS_CURTAS)
+
+
+def _task_match_tokens(task: dict) -> list[str]:
+    base = _normalizar(task.get("title", ""))
+    tokens = [base]
+    for tok in re.findall(r"[\w]+", base):
+        if len(tok) > 3:
+            tokens.append(tok)
+            if tok.endswith(("ar", "er", "ir")) and len(tok) > 4:
+                tokens.append(tok[:-2])
+    return list(dict.fromkeys(tokens))
+
+
+def _resolver_status_fragmento(fragmento: str) -> str | None:
+    if re.search(r"\b(mais ou menos|parcial|meio|quase)\b", fragmento):
+        return "pending"
+    if re.search(r"\b(nao|não|deixei|faltou|falta|pendente|nao fiz|não fiz|nao deu|não deu)\b", fragmento):
+        return "pending"
+    if re.search(r"\b(fiz|feito|conclui|concluido|terminei|finalizei|ok|rolou)\b", fragmento):
+        return "done"
+    return None
+
+
+def _inferir_revisao_por_texto(mensagem: str, tarefas: list[dict]) -> dict[str, bool]:
+    msg = _normalizar(mensagem)
+    atualizacoes: dict[str, bool] = {}
+
+    if re.search(r"\b(fiz tudo|terminei tudo|deu tudo certo)\b", msg):
+        return {task["task_id"]: True for task in tarefas}
+    if re.search(r"\b(nao fiz nada|não fiz nada|deixei tudo|nada saiu)\b", msg):
+        return {task["task_id"]: False for task in tarefas}
+
+    for fragmento in _frases(mensagem):
+        status = _resolver_status_fragmento(fragmento)
+        if status is None:
+            continue
+        for task in tarefas:
+            if any(token and token in fragmento for token in _task_match_tokens(task)):
+                atualizacoes[task["task_id"]] = status == "done"
+    return atualizacoes
+
+
+def _resumo_revisao(contexto: dict) -> tuple[list[dict], list[dict]]:
+    tarefas = contexto.get("review_tasks", [])
+    status_map = contexto.get("review_task_status_map", {})
+    feitas = [task for task in tarefas if status_map.get(task["task_id"])]
+    pendentes = [task for task in tarefas if not status_map.get(task["task_id"])]
+    return feitas, pendentes
+
+
+def _gerar_confirmacao_revisao(user_id: str, contexto: dict) -> str:
+    feitas, pendentes = _resumo_revisao(contexto)
+    pending_action = contexto.get("pending_action", "move" if contexto.get("review_mode") == "planning" else "keep")
+    pending_date = contexto.get("pending_date")
+    novo_contexto = {
+        **contexto,
+        "review_done": True,
+        "done_task_ids": [task["task_id"] for task in feitas],
+        "pending_task_ids": [task["task_id"] for task in pendentes],
+        "pending_action": pending_action,
+        "pending_date": pending_date,
+    }
+    set_session_state(user_id, "review_confirming", context=novo_contexto, replace_context=True)
+    return mensagem_confirmacao_revisao(
+        [task["title"] for task in feitas],
+        [task["title"] for task in pendentes],
+        pending_action,
+        pending_date,
     )
 
 
-def _encerrar_fluxo_pendencias(user_id: str, contexto: dict) -> str:
+def _aplicar_revisao(user_id: str, contexto: dict) -> str:
+    tarefas = contexto.get("review_tasks", [])
+    task_map = {task["task_id"]: task for task in tarefas}
+    done_ids = contexto.get("done_task_ids", [])
+    pending_ids = contexto.get("pending_task_ids", [])
+    pending_action = contexto.get("pending_action", "keep")
+    pending_date = contexto.get("pending_date")
+
+    for task_id in done_ids:
+        complete_task_by_id(task_id, user_id)
+
+    if pending_action == "move" and pending_date:
+        for task_id in pending_ids:
+            reschedule_task(task_id, user_id, pending_date)
+
+    resumo = mensagem_revisao_aplicada(
+        [task_map[task_id]["title"] for task_id in done_ids if task_id in task_map],
+        [task_map[task_id]["title"] for task_id in pending_ids if task_id in task_map],
+        pending_date if pending_action == "move" else None,
+    )
+
+    if contexto.get("review_mode") == "check":
+        set_session_state(user_id, "idle")
+        return resumo
+
     target_date = contexto.get("target_date")
-    remaining_pending = contexto.get("remaining_pending", [])
     if target_date:
-        mensagem = _mensagem_inicio_planejamento(target_date)
+        abertura = _mensagem_inicio_planejamento(target_date)
         set_session_state(
             user_id,
             "planning",
@@ -298,18 +446,14 @@ def _encerrar_fluxo_pendencias(user_id: str, contexto: dict) -> str:
                 "target_date": target_date,
                 "awaiting_target_date": False,
                 "review_done": True,
-                "remaining_pending": remaining_pending,
-                "review_task_ids": contexto.get("review_task_ids", []),
-                "pending_queue": [],
-                "pending_index": 0,
-                "awaiting_move_date_for_task_id": None,
+                "remaining_pending": [],
+                "review_mode": "planning",
             },
             replace_context=True,
         )
-        salvar_historico(user_id, "plan_asst", mensagem)
-        return f"Certo. Pendências alinhadas. {mensagem}"
+        salvar_historico(user_id, "plan_asst", abertura)
+        return f"{resumo}\n\n{abertura}"
 
-    mensagem = _pergunta_data_planejamento()
     set_session_state(
         user_id,
         "planning",
@@ -317,75 +461,86 @@ def _encerrar_fluxo_pendencias(user_id: str, contexto: dict) -> str:
             "target_date": None,
             "awaiting_target_date": True,
             "review_done": True,
-            "remaining_pending": remaining_pending,
-            "review_task_ids": contexto.get("review_task_ids", []),
-            "pending_queue": [],
-            "pending_index": 0,
-            "awaiting_move_date_for_task_id": None,
+            "remaining_pending": [],
+            "review_mode": "planning",
         },
         replace_context=True,
     )
-    return f"Certo. Pendências alinhadas. {mensagem}"
+    return f"{resumo}\n\n{_pergunta_data_planejamento()}"
 
 
-def _tratar_pendencia_por_texto(user_id: str, mensagem: str, contexto: dict) -> str:
-    fila = contexto.get("pending_queue", [])
-    indice = int(contexto.get("pending_index", 0))
-    if indice >= len(fila):
-        return _encerrar_fluxo_pendencias(user_id, contexto)
-
-    atual = fila[indice]
-    titulo = atual.get("title", "essa tarefa")
-    task_id = atual.get("task_id")
-    awaiting_move = contexto.get("awaiting_move_date_for_task_id")
-    data_explicita = _parse_data_explicita(mensagem)
-    acao = "move" if awaiting_move == task_id and data_explicita else _resolver_acao_pendencia(mensagem)
-
-    if acao == "move" and not data_explicita:
-        set_session_state(
-            user_id,
-            "reviewing_pending_tasks",
-            context={**contexto, "awaiting_move_date_for_task_id": task_id},
-            replace_context=True,
-        )
-        return f"Fechou. Pra qual data eu movo '{titulo}'?"
-
-    if acao is None:
-        if awaiting_move == task_id and not data_explicita:
-            return f"Me manda só a nova data de '{titulo}', tipo 30/04, 2026-04-30 ou amanhã."
-        return _pergunta_pendencia(titulo)
-
-    resposta_base = ""
-    remaining_pending = list(contexto.get("remaining_pending", []))
-    if acao == "complete":
-        resposta_base = complete_task_by_id(task_id, user_id)
-    elif acao == "keep":
-        remaining_pending.append({"task_id": task_id, "title": titulo})
-        resposta_base = f"Beleza. '{titulo}' continua pendente com a data original."
-    elif acao == "move":
-        resposta_base = reschedule_task(task_id, user_id, data_explicita)
-        remaining_pending.append({"task_id": task_id, "title": titulo, "due_date": data_explicita})
-
-    proximo_indice = indice + 1
-    novo_contexto = {
-        **contexto,
-        "pending_index": proximo_indice,
-        "remaining_pending": remaining_pending,
-        "awaiting_move_date_for_task_id": None,
-    }
-
-    if proximo_indice >= len(fila):
-        encerramento = _encerrar_fluxo_pendencias(user_id, novo_contexto)
-        return f"{resposta_base}\n\n{encerramento}"
-
-    proxima = fila[proximo_indice]
+def toggle_review_task(user_id: str, task_id: str) -> bool:
+    contexto = get_session_context(user_id)
+    status_map = dict(contexto.get("review_task_status_map", {}))
+    if task_id not in status_map:
+        return False
+    status_map[task_id] = not status_map[task_id]
     set_session_state(
         user_id,
-        "reviewing_pending_tasks",
-        context=novo_contexto,
+        get_session_state(user_id),
+        context={**contexto, "review_task_status_map": status_map},
         replace_context=True,
     )
-    return f"{resposta_base}\n\n{_pergunta_pendencia(proxima.get('title', 'essa tarefa'))}"
+    return status_map[task_id]
+
+
+def finalizar_revisao(user_id: str) -> str:
+    contexto = get_session_context(user_id)
+    return _gerar_confirmacao_revisao(user_id, contexto)
+
+
+def _tratar_revisao_por_texto(user_id: str, mensagem: str, contexto: dict) -> str:
+    tarefas = contexto.get("review_tasks", [])
+    if not tarefas:
+        set_session_state(user_id, "idle")
+        return mensagem_cancelamento()
+
+    atualizacoes = _inferir_revisao_por_texto(mensagem, tarefas)
+    if not atualizacoes and _is_affirmative(mensagem):
+        return _gerar_confirmacao_revisao(user_id, contexto)
+    if not atualizacoes and not re.search(r"\b(fechar|concluir|terminei a revisao|acabei)\b", _normalizar(mensagem)):
+        return mensagem_revisao_sem_match()
+
+    status_map = dict(contexto.get("review_task_status_map", {}))
+    status_map.update(atualizacoes)
+    novo_contexto = {
+        **contexto,
+        "review_task_status_map": status_map,
+    }
+    if "pending_date" not in novo_contexto:
+        novo_contexto["pending_date"] = _proxima_data_pendente(contexto)
+    if "pending_action" not in novo_contexto:
+        novo_contexto["pending_action"] = "move" if contexto.get("review_mode") == "planning" else "keep"
+    set_session_state(user_id, "reviewing_tasks", context=novo_contexto, replace_context=True)
+    return _gerar_confirmacao_revisao(user_id, novo_contexto)
+
+
+def _tratar_confirmacao_revisao(user_id: str, mensagem: str, contexto: dict) -> str:
+    msg = _normalizar(mensagem)
+    if _is_affirmative(mensagem):
+        return _aplicar_revisao(user_id, contexto)
+
+    if re.search(r"\b(nao move|não move|deixa pendente|mantem pendente|mantem assim)\b", msg):
+        novo_contexto = {**contexto, "pending_action": "keep"}
+        return _gerar_confirmacao_revisao(user_id, novo_contexto)
+
+    if re.search(r"\b(move|joga|passa|reagenda|amanha|amanhã)\b", msg):
+        novo_contexto = {
+            **contexto,
+            "pending_action": "move",
+            "pending_date": _parse_data_explicita(mensagem) or contexto.get("pending_date") or _proxima_data_pendente(contexto),
+        }
+        return _gerar_confirmacao_revisao(user_id, novo_contexto)
+
+    tarefas = contexto.get("review_tasks", [])
+    atualizacoes = _inferir_revisao_por_texto(mensagem, tarefas)
+    if atualizacoes:
+        status_map = dict(contexto.get("review_task_status_map", {}))
+        status_map.update(atualizacoes)
+        novo_contexto = {**contexto, "review_task_status_map": status_map}
+        return _gerar_confirmacao_revisao(user_id, novo_contexto)
+
+    return "Se quiser ajustar, me fala algo como 'deixa estudo pendente' ou 'move o resto pra amanhã'. Se estiver certo, manda um ok."
 
 
 # ============================================================
@@ -738,22 +893,43 @@ def chat(mensagem: str, user_id: str) -> str:
         logger.info(f"[Forced routing] Planejamento iniciado manualmente por {user_id}")
         return resposta
 
-    # Revisão de tarefas via inline keyboard — usuário pode sair por texto
+    if state == "idle" and _quer_iniciar_check(mensagem):
+        from app.scheduler.jobs import iniciar_revisao_check
+
+        logger.info(f"[Forced routing] Revisão manual iniciada por {user_id}")
+        handled, resposta = iniciar_revisao_check(user_id)
+        if handled:
+            return resposta
+
     if state == "reviewing_tasks":
         if _quer_sair_planejamento(mensagem):
             set_session_state(user_id, "idle")
             logger.info(f"[Forced routing] Saída de reviewing_tasks por texto: {user_id}")
-            return "Beleza, deixei pra lá. Quando quiser, é só me chamar. 😊"
-        return "Use os botões acima para marcar suas tarefas de hoje, depois toque em 'Concluir revisão' para continuar."
+            return mensagem_cancelamento()
+        return _tratar_revisao_por_texto(user_id, mensagem, session_context)
 
     if state == "reviewing_pending_tasks":
         if _quer_sair_planejamento(mensagem):
             set_session_state(user_id, "idle")
-            return "Fechei por aqui. Quando quiser retomar, eu continuo com você."
-        return _tratar_pendencia_por_texto(user_id, mensagem, session_context)
+            return mensagem_cancelamento()
+        return _tratar_revisao_por_texto(user_id, mensagem, session_context)
+
+    if state == "review_confirming":
+        if _quer_sair_planejamento(mensagem):
+            set_session_state(user_id, "idle")
+            return mensagem_cancelamento()
+        return _tratar_confirmacao_revisao(user_id, mensagem, session_context)
 
     # Modo planejamento: usa histórico isolado para não contaminar contexto normal
     if state == "planning":
+        if _quer_sair_planejamento(mensagem):
+            from app.agent.tools import finalizar_planejamento
+
+            finalizar_planejamento(user_id=user_id, tarefas=[])
+            salvar_historico(user_id, "plan_user", mensagem)
+            salvar_historico(user_id, "plan_asst", mensagem_cancelamento())
+            return mensagem_cancelamento()
+
         if session_context.get("awaiting_target_date"):
             target_date = _parse_data_explicita(mensagem)
             if not target_date:

@@ -552,10 +552,10 @@ def finalizar_planejamento(user_id: str, tarefas: list = None) -> str:
         set_session_state(user_id, "idle")
 
         if salvas:
-            return f"Planejamento finalizado! {len(salvas)} tarefa(s) salva(s): {', '.join(salvas)}"
+            return f"Fechei seu plano. Salvei {len(salvas)} tarefa(s): {', '.join(salvas)}."
         if ignoradas:
-            return "Planejamento finalizado. Todas as tarefas já existiam no banco."
-        return "Sessão de planejamento encerrada."
+            return "Fechei por aqui. O que você listou já estava salvo."
+        return "Fechei por aqui sem salvar tarefa nova."
 
     except Exception as e:
         db.rollback()

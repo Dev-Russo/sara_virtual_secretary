@@ -6,7 +6,13 @@ from app.models.user_session import UserSession
 
 logger = logging.getLogger(__name__)
 
-VALID_STATES = ("idle", "planning", "reviewing_tasks", "reviewing_pending_tasks")
+VALID_STATES = (
+    "idle",
+    "planning",
+    "reviewing_tasks",
+    "reviewing_pending_tasks",
+    "review_confirming",
+)
 
 # Estados de planejamento expiram após inatividade — evita usuário preso
 STATE_TTL_MINUTES = 180  # 3 horas
@@ -19,7 +25,7 @@ def get_session_state(user_id: str) -> str:
         if not session:
             return "idle"
 
-        if session.state in ("planning", "reviewing_tasks", "reviewing_pending_tasks") and session.updated_at:
+        if session.state in ("planning", "reviewing_tasks", "reviewing_pending_tasks", "review_confirming") and session.updated_at:
             updated = session.updated_at
             if updated.tzinfo is None:
                 updated = updated.replace(tzinfo=timezone.utc)

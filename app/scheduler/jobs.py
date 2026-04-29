@@ -15,6 +15,7 @@ Correções aplicadas:
 import logging
 import re
 import uuid
+import secrets
 from datetime import datetime, timedelta, date
 
 import pytz
@@ -32,11 +33,16 @@ from app.services.telegram import (
     enviar_inicio_planejamento,
     enviar_pergunta_data_planejamento,
     enviar_revisao_tarefas,
-    enviar_inicio_tratamento_pendencias,
-    enviar_pergunta_pendencia,
+    enviar_mensagem,
 )
 from app.agent.session import set_session_state, get_session_context
 from app.agent.sara_agent import limpar_historico_planning
+from app.agent.copy import (
+    mensagem_abertura_planejamento,
+    mensagem_pergunta_data_planejamento,
+    mensagem_revisao_check,
+    mensagem_revisao_planejamento,
+)
 from app.models.tool_call_log import ToolCallLog
 from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
 
@@ -142,60 +148,76 @@ def _buscar_tarefas_por_ids(user_id: str, task_ids: list[str]) -> list[Task]:
         db.close()
 
 
+def _serializar_tarefas_revisao(tarefas: list[Task]) -> list[dict]:
+    return [{"task_id": str(task.id), "title": task.title} for task in tarefas]
+
+
+def _novo_contexto_revisao(
+    tarefas: list[Task],
+    *,
+    review_mode: str,
+    target_date: str | None,
+    awaiting_target_date: bool,
+) -> tuple[str, dict]:
+    review_session_id = secrets.token_hex(8)
+    review_tasks = _serializar_tarefas_revisao(tarefas)
+    status_map = {task["task_id"]: False for task in review_tasks}
+    contexto = {
+        "review_session_id": review_session_id,
+        "review_mode": review_mode,
+        "review_task_ids": [task["task_id"] for task in review_tasks],
+        "review_tasks": review_tasks,
+        "review_task_status_map": status_map,
+        "target_date": target_date,
+        "awaiting_target_date": awaiting_target_date,
+        "review_done": False,
+        "remaining_pending": [],
+    }
+    return review_session_id, contexto
+
+
 async def abrir_fluxo_pos_revisao(user_id: str) -> None:
-    from app.agent.sara_agent import salvar_historico
+    from app.agent.sara_agent import finalizar_revisao
 
-    contexto = get_session_context(user_id)
-    review_task_ids = contexto.get("review_task_ids", [])
-    target_date = contexto.get("target_date")
-    pendentes = _buscar_tarefas_por_ids(user_id, review_task_ids)
+    resposta = finalizar_revisao(user_id)
+    await enviar_mensagem(user_id, resposta)
 
-    if pendentes:
-        pendencias_contexto = [
-            {"task_id": str(task.id), "title": task.title}
-            for task in pendentes
-        ]
-        set_session_state(
-            user_id,
-            "reviewing_pending_tasks",
-            context={
-                "review_done": True,
-                "pending_queue": pendencias_contexto,
-                "pending_index": 0,
-            },
-        )
-        await enviar_inicio_tratamento_pendencias(user_id)
-        await enviar_pergunta_pendencia(user_id, pendencias_contexto[0]["title"])
-        return
 
-    if target_date:
-        mensagem = (
-            f"Beleza. Agora vamos olhar {datetime.strptime(target_date, '%Y-%m-%d').strftime('%d/%m/%Y')}. "
-            "O que precisa acontecer nesse dia pra ele render?"
-        )
-        set_session_state(
-            user_id,
-            "planning",
-            context={
-                "review_done": True,
-                "remaining_pending": [],
-                "awaiting_target_date": False,
-            },
-        )
-        await enviar_inicio_planejamento(user_id, target_date)
-        salvar_historico(user_id, "plan_asst", mensagem)
-        return
+def iniciar_revisao_check(user_id: str) -> tuple[bool, str]:
+    tarefas_hoje = buscar_tarefas_hoje(user_id, only_past=False)
+    if not tarefas_hoje:
+        return True, mensagem_revisao_check([])
 
-    set_session_state(
-        user_id,
-        "planning",
-        context={
-            "review_done": True,
-            "remaining_pending": [],
-            "awaiting_target_date": True,
-        },
+    review_session_id, contexto = _novo_contexto_revisao(
+        tarefas_hoje,
+        review_mode="check",
+        target_date=None,
+        awaiting_target_date=False,
     )
-    await enviar_pergunta_data_planejamento(user_id)
+    set_session_state(user_id, "reviewing_tasks", context=contexto, replace_context=True)
+    texto = mensagem_revisao_check(contexto["review_tasks"])
+    return True, texto
+
+
+async def iniciar_revisao_check_manual(user_id: str) -> bool:
+    tarefas_hoje = buscar_tarefas_hoje(user_id, only_past=False)
+    if not tarefas_hoje:
+        await enviar_mensagem(user_id, mensagem_revisao_check([]))
+        return True
+
+    review_session_id, contexto = _novo_contexto_revisao(
+        tarefas_hoje,
+        review_mode="check",
+        target_date=None,
+        awaiting_target_date=False,
+    )
+    set_session_state(user_id, "reviewing_tasks", context=contexto, replace_context=True)
+    return await enviar_revisao_tarefas(
+        user_id,
+        tarefas_hoje,
+        mensagem_revisao_check(contexto["review_tasks"]),
+        review_session_id,
+    )
 
 
 async def verificar_lembretes():
@@ -497,22 +519,24 @@ async def iniciar_planejamento_manual(user_id: str, mensagem: str) -> bool:
     # não faz sentido pedir revisão de algo que ainda vai acontecer.
     tarefas_hoje = buscar_tarefas_hoje(user_id, only_past=True)
     if tarefas_hoje:
-        review_task_ids = [str(task.id) for task in tarefas_hoje]
+        review_session_id, contexto = _novo_contexto_revisao(
+            tarefas_hoje,
+            review_mode="planning",
+            target_date=target_date,
+            awaiting_target_date=target_date is None,
+        )
         set_session_state(
             user_id,
             "reviewing_tasks",
-            context={
-                "target_date": target_date,
-                "awaiting_target_date": target_date is None,
-                "review_done": False,
-                "remaining_pending": [],
-                "review_task_ids": review_task_ids,
-                "pending_queue": [],
-                "pending_index": 0,
-            },
+            context=contexto,
             replace_context=True,
         )
-        enviado = await enviar_revisao_tarefas(user_id, tarefas_hoje)
+        enviado = await enviar_revisao_tarefas(
+            user_id,
+            tarefas_hoje,
+            mensagem_revisao_planejamento(contexto["review_tasks"]),
+            review_session_id,
+        )
         if enviado:
             return True
         logger.warning("[Manual] Falha ao enviar revisão, indo direto ao planejamento.")
@@ -520,10 +544,7 @@ async def iniciar_planejamento_manual(user_id: str, mensagem: str) -> bool:
     if target_date:
         from app.agent.sara_agent import salvar_historico
 
-        abertura = (
-            f"Beleza. Agora vamos olhar {datetime.strptime(target_date, '%Y-%m-%d').strftime('%d/%m/%Y')}. "
-            "O que precisa acontecer nesse dia pra ele render?"
-        )
+        abertura = mensagem_abertura_planejamento(target_date)
         set_session_state(
             user_id,
             "planning",
@@ -532,9 +553,7 @@ async def iniciar_planejamento_manual(user_id: str, mensagem: str) -> bool:
                 "awaiting_target_date": False,
                 "review_done": False,
                 "remaining_pending": [],
-                "review_task_ids": [],
-                "pending_queue": [],
-                "pending_index": 0,
+                "review_mode": "planning",
             },
             replace_context=True,
         )
@@ -550,9 +569,7 @@ async def iniciar_planejamento_manual(user_id: str, mensagem: str) -> bool:
             "awaiting_target_date": True,
             "review_done": False,
             "remaining_pending": [],
-            "review_task_ids": [],
-            "pending_queue": [],
-            "pending_index": 0,
+            "review_mode": "planning",
         },
         replace_context=True,
     )
@@ -582,21 +599,24 @@ async def iniciar_planejamento():
     tarefas_hoje = buscar_tarefas_hoje(ALLOWED_CHAT_ID)
     if tarefas_hoje:
         logger.info(f"[Scheduler] {len(tarefas_hoje)} tarefa(s) para revisar hoje.")
+        review_session_id, contexto = _novo_contexto_revisao(
+            tarefas_hoje,
+            review_mode="planning",
+            target_date=target_date,
+            awaiting_target_date=False,
+        )
         set_session_state(
             ALLOWED_CHAT_ID,
             "reviewing_tasks",
-            context={
-                "target_date": target_date,
-                "awaiting_target_date": False,
-                "review_done": False,
-                "remaining_pending": [],
-                "review_task_ids": [str(task.id) for task in tarefas_hoje],
-                "pending_queue": [],
-                "pending_index": 0,
-            },
+            context=contexto,
             replace_context=True,
         )
-        enviado = await enviar_revisao_tarefas(ALLOWED_CHAT_ID, tarefas_hoje)
+        enviado = await enviar_revisao_tarefas(
+            ALLOWED_CHAT_ID,
+            tarefas_hoje,
+            mensagem_revisao_planejamento(contexto["review_tasks"]),
+            review_session_id,
+        )
         if enviado:
             logger.info("[Scheduler] Revisão de tarefas enviada, aguardando interação do usuário.")
             return
@@ -604,10 +624,7 @@ async def iniciar_planejamento():
 
     from app.agent.sara_agent import salvar_historico
 
-    abertura = (
-        f"Beleza. Agora vamos olhar {datetime.strptime(target_date, '%Y-%m-%d').strftime('%d/%m/%Y')}. "
-        "O que precisa acontecer nesse dia pra ele render?"
-    )
+    abertura = mensagem_abertura_planejamento(target_date)
     set_session_state(
         ALLOWED_CHAT_ID,
         "planning",
@@ -616,9 +633,7 @@ async def iniciar_planejamento():
             "awaiting_target_date": False,
             "review_done": False,
             "remaining_pending": [],
-            "review_task_ids": [],
-            "pending_queue": [],
-            "pending_index": 0,
+            "review_mode": "planning",
         },
         replace_context=True,
     )

@@ -14,6 +14,7 @@ Suporte a áudio:
 
 import logging
 import tempfile
+import asyncio
 from secrets import compare_digest
 
 from fastapi import APIRouter, BackgroundTasks, Header
@@ -21,9 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from groq import Groq
 
-import uuid
-
-from app.agent.sara_agent import chat
+from app.agent.sara_agent import chat, _quer_iniciar_check
 from app.services.telegram import (
     enviar_mensagem_longa,
     responder_callback,
@@ -33,13 +32,13 @@ from app.services.telegram import (
 from app.config import ALLOWED_CHAT_ID, GROQ_API_KEY, TELEGRAM_WEBHOOK_SECRET
 from app.db.database import SessionLocal
 from app.models.processed_update import ProcessedUpdate
-from app.models.task import Task
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["telegram"])
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+_user_locks: dict[str, asyncio.Lock] = {}
 
 
 def _webhook_autenticado(secret_header: str | None) -> bool:
@@ -124,43 +123,47 @@ async def _transcrever_audio(file_id: str) -> str | None:
         return None
 
 
-def _marcar_tarefa_done(task_id: str) -> bool:
-    """Marca uma tarefa como concluída pelo seu UUID."""
-    db = SessionLocal()
-    try:
-        from datetime import datetime as _dt
-        tarefa = db.query(Task).filter(Task.id == uuid.UUID(task_id)).first()
-        if tarefa:
-            tarefa.status = "done"
-            tarefa.updated_at = _dt.utcnow()
-            db.commit()
-            logger.info(f"[Callback] Tarefa {task_id[:8]}... marcada como concluída")
-            return True
-        return False
-    except Exception as e:
-        db.rollback()
-        logger.error(f"[Callback] Erro ao marcar tarefa {task_id}: {e}")
-        return False
-    finally:
-        db.close()
+def _get_user_lock(chat_id: str) -> asyncio.Lock:
+    lock = _user_locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _user_locks[chat_id] = lock
+    return lock
 
 
 async def _processar_callback(data: str, chat_id: str, message_id: int, query_id: str) -> None:
     """Processa o toque em um botão do inline keyboard de revisão de tarefas."""
+    from app.agent.sara_agent import finalizar_revisao, toggle_review_task
+    from app.agent.session import get_session_context, get_session_state
+
     await responder_callback(query_id)
+    async with _get_user_lock(chat_id):
+        partes = data.split(":")
+        if len(partes) < 3 or partes[0] != "review":
+            return
 
-    if data.startswith("task:"):
-        task_id = data.split(":", 1)[1]
-        _marcar_tarefa_done(task_id)
+        review_session_id = partes[1]
+        contexto = get_session_context(chat_id)
+        if not contexto or contexto.get("review_session_id") != review_session_id:
+            logger.info(f"[Callback] Revisão obsoleta ignorada para {chat_id}")
+            return
+
         state = _revisao_state.get(chat_id)
-        if state and task_id in state["tasks"]:
-            state["tasks"][task_id]["done"] = True
-        await editar_revisao_tarefas(chat_id, message_id)
+        if state and state.get("review_session_id") != review_session_id:
+            logger.info(f"[Callback] Keyboard obsoleto ignorado para {chat_id}")
+            return
 
-    elif data == "concluir_revisao":
-        from app.scheduler.jobs import abrir_fluxo_pos_revisao
+        if len(partes) >= 4 and partes[2] == "task":
+            task_id = partes[3]
+            marcado = toggle_review_task(chat_id, task_id)
+            if state and task_id in state["tasks"]:
+                state["tasks"][task_id]["done"] = marcado
+            await editar_revisao_tarefas(chat_id, message_id)
+            return
 
-        await abrir_fluxo_pos_revisao(chat_id)
+        if partes[2] == "finish" and get_session_state(chat_id) == "reviewing_tasks":
+            resposta = finalizar_revisao(chat_id)
+            await enviar_mensagem_longa(chat_id, resposta)
 
 
 async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
@@ -168,18 +171,24 @@ async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
     try:
         from app.agent.sara_agent import _quer_iniciar_planejamento, limpar_historico_planning
         from app.agent.session import get_session_state
-        from app.scheduler.jobs import iniciar_planejamento_manual
+        from app.scheduler.jobs import iniciar_planejamento_manual, iniciar_revisao_check_manual
 
-        if _quer_iniciar_planejamento(text) and get_session_state(chat_id) == "idle":
-            limpar_historico_planning(chat_id)
-            handled = await iniciar_planejamento_manual(chat_id, text)
-            if handled:
-                return
+        async with _get_user_lock(chat_id):
+            if _quer_iniciar_planejamento(text) and get_session_state(chat_id) == "idle":
+                limpar_historico_planning(chat_id)
+                handled = await iniciar_planejamento_manual(chat_id, text)
+                if handled:
+                    return
 
-        resposta = chat(text, user_id=chat_id)
-        enviado = await enviar_mensagem_longa(chat_id, resposta)
-        if not enviado:
-            logger.warning(f"❌ Falha ao enviar resposta para {first_name} ({chat_id})")
+            if _quer_iniciar_check(text) and get_session_state(chat_id) == "idle":
+                handled = await iniciar_revisao_check_manual(chat_id)
+                if handled:
+                    return
+
+            resposta = chat(text, user_id=chat_id)
+            enviado = await enviar_mensagem_longa(chat_id, resposta)
+            if not enviado:
+                logger.warning(f"❌ Falha ao enviar resposta para {first_name} ({chat_id})")
     except Exception as e:
         logger.error(f"Erro ao processar mensagem de {chat_id}: {e}", exc_info=True)
 
