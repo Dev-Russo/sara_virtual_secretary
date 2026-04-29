@@ -66,7 +66,14 @@ from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.user_session import UserSession
 from app.agent.session import get_session_state, set_session_state, get_session_context
-from app.agent.sara_agent import _quer_iniciar_planejamento, chat, toggle_review_task, finalizar_revisao
+from app.agent.sara_agent import (
+    _quer_iniciar_planejamento,
+    _quer_sair_planejamento,
+    _confirmou_plano,
+    chat,
+    toggle_review_task,
+    finalizar_revisao,
+)
 import app.scheduler.jobs as jobs
 from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao, iniciar_revisao_check
 
@@ -164,6 +171,15 @@ def test_keywords():
         check(f'"{msg}" → ativa', _quer_iniciar_planejamento(msg))
     for msg in negativos:
         check(f'"{msg}" → NÃO ativa', not _quer_iniciar_planejamento(msg))
+
+    check('"não quero mais" → sai do fluxo', _quer_sair_planejamento("não quero mais"))
+    check(
+        '"sim" após confirmação do plano → confirma plano',
+        _confirmou_plano(
+            [{"role": "assistant", "content": "Tudo certo? Faz sentido assim?"}],
+            "sim",
+        ),
+    )
 
 
 def test_briefing_format():

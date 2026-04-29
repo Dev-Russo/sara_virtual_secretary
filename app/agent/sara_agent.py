@@ -131,6 +131,7 @@ _EXIT_PLANNING = [
     r"\bdesist[oi]\b",
     r"\bdeixa\s+(pra|para)\s+(l[aá]|depois|amanh[aã]|outra\s+hora)\b",
     r"\bdepois\s+eu\s+(fa[çc]o|vejo|planejo)\b",
+    r"\bn[aã]o\s+quero\s+mais\b",
     r"\bn[aã]o\s+(quero|vou|posso)\s+(fazer|isso|agora|nada|hoje)\b",
     r"\bp[aá]r[ao]\s+com\s+isso\b",
     r"\bme\s+deixa\s+em\s+paz\b",
@@ -203,6 +204,32 @@ def _confirmou_saida(historico: list, mensagem: str) -> bool:
 
     msg = mensagem.lower().strip()
     return any(re.search(p, msg) for p in _AFIRMATIVAS_CURTAS)
+
+
+def _ultima_fala_assistente(historico: list) -> str:
+    for h in reversed(historico):
+        if h.get("role") == "assistant":
+            return (h.get("content") or "").lower()
+    return ""
+
+
+def _confirmou_plano(historico: list, mensagem: str) -> bool:
+    last_asst = _ultima_fala_assistente(historico)
+    if not last_asst or not _is_affirmative(mensagem):
+        return False
+
+    confirmou_plano = any(
+        marcador in last_asst
+        for marcador in (
+            "faz sentido",
+            "tudo certo",
+            "isso mesmo",
+            "tem algo que ajusta",
+            "muda na ordem",
+            "combina com o ritmo",
+        )
+    )
+    return confirmou_plano
 
 
 def _precisa_concluir_todas(mensagem: str) -> bool:
@@ -790,19 +817,42 @@ def _chat_planning(
         logger.info(f"[Planning] Saída confirmada via safety net para {user_id}.")
         return resposta
 
+    confirmou_plano = _confirmou_plano(historico, mensagem)
+
     messages = [
         *historico,
         {"role": "user", "content": mensagem},
     ]
 
+    planning_system_prompt = system_prompt
+    if confirmou_plano:
+        planning_system_prompt += (
+            "\n\nINSTRUÇÃO OBRIGATÓRIA PARA ESTA MENSAGEM: "
+            "o usuário ACABOU de confirmar o plano. "
+            "NÃO reformule o resumo, NÃO pergunte de novo. "
+            "Chame finalizar_planejamento imediatamente com a lista completa de tarefas acordadas."
+        )
+
     try:
         response = anthropic_client.messages.create(
             model=ANTHROPIC_MODEL,
             max_tokens=ANTHROPIC_MAX_TOKENS,
-            system=system_prompt,
+            system=planning_system_prompt,
             tools=tools_schema,
             messages=messages,
         )
+
+        if confirmou_plano and response.stop_reason != "tool_use":
+            response = anthropic_client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=ANTHROPIC_MAX_TOKENS,
+                system=planning_system_prompt + (
+                    "\n\nSua resposta anterior estaria errada se não chamasse a tool agora. "
+                    "Finalize o plano nesta resposta."
+                ),
+                tools=tools_schema,
+                messages=messages,
+            )
 
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
@@ -826,7 +876,7 @@ def _chat_planning(
             response2 = anthropic_client.messages.create(
                 model=ANTHROPIC_MODEL,
                 max_tokens=ANTHROPIC_MAX_TOKENS,
-                system=system_prompt,
+                system=planning_system_prompt,
                 messages=messages,
             )
             resposta = _extrair_texto(response2.content)
