@@ -31,6 +31,13 @@ TIMEZONE = pytz.timezone("America/Sao_Paulo")
 LOGICAL_DAY_CUTOFF_HOUR = 4
 
 VALID_PRIORITIES = ("low", "medium", "high")
+TASK_CATEGORIES = ("today", "overdue", "backlog", "upcoming")
+CATEGORY_LABELS = {
+    "today": "Hoje",
+    "overdue": "Atrasadas",
+    "backlog": "Backlog",
+    "upcoming": "Próximas",
+}
 MAX_TITLE_LENGTH = 500
 MAX_MESSAGE_LENGTH = 1000
 
@@ -52,6 +59,135 @@ def intervalo_dia_logico(agora: datetime | None = None) -> tuple[datetime, datet
     inicio = ref.replace(hour=0, minute=0, second=0, microsecond=0)
     fim = ref.replace(hour=23, minute=59, second=59, microsecond=0)
     return inicio, fim
+
+
+def calcular_categoria(status: str, due_date: datetime | None, agora: datetime | None = None) -> str | None:
+    if status != "pending":
+        return None
+    if due_date is None:
+        return "backlog"
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+    dt = due_date
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
+    else:
+        dt = dt.astimezone(TIMEZONE)
+    inicio, fim = intervalo_dia_logico(agora)
+    if dt < inicio:
+        return "overdue"
+    if dt <= fim:
+        return "today"
+    return "upcoming"
+
+
+def atualizar_categoria_tarefa(task: Task, agora: datetime | None = None) -> str | None:
+    task.category = calcular_categoria(task.status, task.due_date, agora)
+    return task.category
+
+
+def sincronizar_categorias_pendentes(
+    db,
+    *,
+    user_id: str | None = None,
+    agora: datetime | None = None,
+) -> int:
+    query = db.query(Task).filter(Task.status == "pending")
+    if user_id:
+        query = query.filter(Task.user_id == user_id)
+    tarefas = query.all()
+    changed = 0
+    for task in tarefas:
+        nova = calcular_categoria(task.status, task.due_date, agora)
+        if task.category != nova:
+            task.category = nova
+            changed += 1
+    if changed:
+        db.commit()
+    return changed
+
+
+def _formatar_linha_tarefa(task: Task) -> str:
+    prioridade = f" [{task.priority}]" if task.priority != "medium" else ""
+    if task.due_date:
+        dt = task.due_date
+        if dt.tzinfo is None:
+            dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
+        else:
+            dt = dt.astimezone(TIMEZONE)
+        if dt.hour == 0 and dt.minute == 0:
+            prazo = f" — {dt.strftime('%d/%m/%Y')}"
+        else:
+            prazo = f" — {dt.strftime('%d/%m/%Y às %H:%M')}"
+    else:
+        prazo = ""
+    return f"• {task.title}{prazo}{prioridade}"
+
+
+def _formatar_grupos_tarefas(grupos: dict[str, list[Task]], *, cabecalho: str) -> str:
+    secoes: list[str] = []
+    for categoria in ("today", "overdue", "backlog", "upcoming"):
+        tarefas = grupos.get(categoria, [])
+        if not tarefas:
+            continue
+        linhas = "\n".join(_formatar_linha_tarefa(task) for task in tarefas)
+        secoes.append(f"{CATEGORY_LABELS[categoria]}:\n{linhas}")
+    if not secoes:
+        return "Agora você não tem nada pendente."
+
+    texto = f"{cabecalho}\n\n" + "\n\n".join(secoes)
+    if grupos.get("overdue"):
+        texto += "\n\nMinha sugestão: resolve a primeira atrasada ou me fala se quer jogar ela pra outro dia."
+    return texto
+
+
+def obter_grupos_tarefas(user_id: str, *, sync: bool = True, agora: datetime | None = None) -> dict[str, list[Task]]:
+    db = SessionLocal()
+    try:
+        if sync:
+            sincronizar_categorias_pendentes(db, user_id=user_id, agora=agora)
+        tarefas = (
+            db.query(Task)
+            .filter(Task.user_id == user_id, Task.status == "pending")
+            .order_by(Task.due_date.asc().nullslast(), Task.created_at.asc())
+            .all()
+        )
+        grupos = {categoria: [] for categoria in TASK_CATEGORIES}
+        for task in tarefas:
+            categoria = task.category or calcular_categoria(task.status, task.due_date, agora)
+            if categoria:
+                grupos.setdefault(categoria, []).append(task)
+        return grupos
+    finally:
+        db.close()
+
+
+def resumo_hoje(user_id: str) -> str:
+    grupos = obter_grupos_tarefas(user_id)
+    return _formatar_grupos_tarefas(grupos, cabecalho="Hoje tá assim:")
+
+
+def resumo_backlog(user_id: str) -> str:
+    grupos = obter_grupos_tarefas(user_id)
+    backlog = grupos.get("backlog", [])
+    if not backlog:
+        return "Seu backlog tá vazio agora."
+    linhas = "\n".join(_formatar_linha_tarefa(task) for task in backlog)
+    return f"Seu backlog tá assim:\n\nBacklog:\n{linhas}"
+
+
+def briefing_do_dia(user_id: str) -> str:
+    grupos = obter_grupos_tarefas(user_id)
+    if not any(grupos.values()):
+        return "Bom dia. Hoje tá mais livre. Se quiser, me chama que eu te ajudo a organizar."
+    return "Bom dia. Hoje tá assim:\n\n" + "\n\n".join(
+        f"{CATEGORY_LABELS[categoria]}:\n" + "\n".join(_formatar_linha_tarefa(task) for task in grupos[categoria])
+        for categoria in ("today", "overdue", "backlog", "upcoming")
+        if grupos.get(categoria)
+    ) + (
+        "\n\nMinha sugestão: resolve a primeira atrasada ou me fala se quer jogar ela pra outro dia."
+        if grupos.get("overdue") else ""
+    )
 
 
 # ============================================================
@@ -166,6 +302,7 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
             user_id=user_id,
             title=title,
             due_date=parsed_date,
+            category=calcular_categoria("pending", parsed_date),
             priority=priority,
             status="pending",
         )
@@ -174,7 +311,8 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
         db.refresh(task)
 
         prazo = f" para {parsed_date.strftime('%d/%m/%Y às %H:%M')}" if parsed_date else " sem prazo definido"
-        return f"Tarefa '{title}' salva com sucesso{prazo}!"
+        categoria = task.category or "backlog"
+        return f"Tarefa '{title}' salva com sucesso{prazo}! Categoria: {categoria}."
 
     except Exception as e:
         db.rollback()
@@ -214,6 +352,7 @@ def create_reminder(message: str, user_id: str, remind_at: str) -> str:
 def list_tasks(user_id: str, filter_date: str = None) -> str:
     db = SessionLocal()
     try:
+        sincronizar_categorias_pendentes(db, user_id=user_id)
         query = db.query(Task).filter(
             Task.user_id == user_id,
             Task.status == "pending",
@@ -238,21 +377,18 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
                 return f"Nenhuma tarefa encontrada para {filter_date}."
             return "Nenhuma tarefa pendente encontrada."
 
-        linhas = [f"Você tem {len(tasks)} tarefa(s) pendente(s):"]
-        for task in tasks:
-            if task.due_date:
-                dt = task.due_date
-                if dt.tzinfo is None:
-                    dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
-                else:
-                    dt = dt.astimezone(TIMEZONE)
-                prazo = f" — {dt.strftime('%d/%m/%Y às %H:%M')}"
-            else:
-                prazo = " — sem prazo definido"
-            prioridade = f" [{task.priority}]" if task.priority != "medium" else ""
-            linhas.append(f"• {task.title}{prazo}{prioridade}")
+        if filter_date:
+            linhas = [f"Você tem {len(tasks)} tarefa(s) pendente(s):"]
+            linhas.extend(_formatar_linha_tarefa(task) for task in tasks)
+            return "\n".join(linhas)
 
-        return "\n".join(linhas)
+        grupos = {categoria: [] for categoria in TASK_CATEGORIES}
+        for task in tasks:
+            categoria = task.category or calcular_categoria(task.status, task.due_date)
+            if categoria:
+                grupos[categoria].append(task)
+
+        return _formatar_grupos_tarefas(grupos, cabecalho="Seu panorama agora tá assim:")
 
     except Exception as e:
         logger.error(f"[list_tasks] {e}")
@@ -288,6 +424,7 @@ def complete_all_tasks(user_id: str, filter_date: str = None) -> str:
 
         for task in tasks:
             task.status = "done"
+            task.category = None
             task.updated_at = datetime.now(TIMEZONE)
 
         db.commit()
@@ -326,6 +463,7 @@ def complete_task(title: str, user_id: str) -> str:
             return f"Nenhuma tarefa pendente encontrada com '{title}'."
 
         task.status = "done"
+        task.category = None
         task.updated_at = datetime.now(TIMEZONE)
         db.commit()
 
@@ -352,6 +490,7 @@ def complete_task_by_id(task_id: str, user_id: str) -> str:
             return "Nenhuma tarefa pendente encontrada para concluir."
 
         task.status = "done"
+        task.category = None
         task.updated_at = datetime.now(TIMEZONE)
         db.commit()
         return f"Tarefa '{task.title}' marcada como concluída! ✅"
@@ -481,6 +620,7 @@ def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
             parsed_date = parsed_date.replace(hour=atual.hour, minute=atual.minute)
 
         task.due_date = TIMEZONE.localize(parsed_date)
+        atualizar_categoria_tarefa(task)
         task.updated_at = datetime.now(TIMEZONE)
         db.commit()
 
@@ -542,6 +682,7 @@ def finalizar_planejamento(user_id: str, tarefas: list = None) -> str:
                 user_id=user_id,
                 title=title,
                 due_date=parsed_date,
+                category=calcular_categoria("pending", parsed_date),
                 priority=priority,
                 status="pending",
             )
@@ -565,6 +706,39 @@ def finalizar_planejamento(user_id: str, tarefas: list = None) -> str:
         db.close()
 
 
+def list_reminders(user_id: str) -> str:
+    db = SessionLocal()
+    try:
+        agora = datetime.now(TIMEZONE)
+        lembretes = (
+            db.query(Reminder)
+            .filter(
+                Reminder.user_id == user_id,
+                Reminder.sent == False,
+                Reminder.remind_at >= agora,
+            )
+            .order_by(Reminder.remind_at.asc())
+            .all()
+        )
+        if not lembretes:
+            return "Você não tem lembrete pendente agora."
+
+        linhas = ["Seus lembretes que ainda vão tocar:"]
+        for lembrete in lembretes:
+            dt = lembrete.remind_at
+            if dt.tzinfo is None:
+                dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
+            else:
+                dt = dt.astimezone(TIMEZONE)
+            linhas.append(f"• {dt.strftime('%d/%m/%Y às %H:%M')} — {lembrete.message}")
+        return "\n".join(linhas)
+    except Exception as e:
+        logger.error(f"[list_reminders] {e}")
+        return f"Erro ao listar lembretes: {str(e)}"
+    finally:
+        db.close()
+
+
 # ============================================================
 # MAPA DE TOOLS
 # ============================================================
@@ -573,6 +747,7 @@ TOOLS_MAP: dict[str, callable] = {
     "save_task": save_task,
     "create_reminder": create_reminder,
     "list_tasks": list_tasks,
+    "list_reminders": list_reminders,
     "complete_task": complete_task,
     "complete_all_tasks": complete_all_tasks,
     "delete_task": delete_task,
@@ -650,6 +825,15 @@ TOOLS_SCHEMA: list[dict] = [
                     "description": "Filtra tarefas de uma data específica no formato 'YYYY-MM-DD'. Opcional.",
                 },
             },
+            "required": [],
+        },
+    },
+    {
+        "name": "list_reminders",
+        "description": "Lista os lembretes futuros do usuário que ainda não foram enviados.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
             "required": [],
         },
     },

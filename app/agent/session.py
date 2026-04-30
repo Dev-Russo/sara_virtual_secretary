@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 VALID_STATES = (
     "idle",
+    "adding_task",
     "planning",
     "reviewing_tasks",
     "reviewing_pending_tasks",
@@ -25,7 +26,7 @@ def get_session_state(user_id: str) -> str:
         if not session:
             return "idle"
 
-        if session.state in ("planning", "reviewing_tasks", "reviewing_pending_tasks", "review_confirming") and session.updated_at:
+        if session.state in ("adding_task", "planning", "reviewing_tasks", "reviewing_pending_tasks", "review_confirming") and session.updated_at:
             updated = session.updated_at
             if updated.tzinfo is None:
                 updated = updated.replace(tzinfo=timezone.utc)

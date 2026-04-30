@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from groq import Groq
 
 from app.agent.sara_agent import chat, _quer_iniciar_check
+from app.agent.copy import HOME_BUTTON_PLANEJAR, HOME_BUTTON_REVISAR
 from app.services.telegram import (
     enviar_mensagem_longa,
     responder_callback,
@@ -174,13 +175,13 @@ async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
         from app.scheduler.jobs import iniciar_planejamento_manual, iniciar_revisao_check_manual
 
         async with _get_user_lock(chat_id):
-            if _quer_iniciar_planejamento(text) and get_session_state(chat_id) == "idle":
+            if (_quer_iniciar_planejamento(text) or text.strip().lower() == HOME_BUTTON_PLANEJAR.lower()) and get_session_state(chat_id) == "idle":
                 limpar_historico_planning(chat_id)
                 handled = await iniciar_planejamento_manual(chat_id, text)
                 if handled:
                     return
 
-            if _quer_iniciar_check(text) and get_session_state(chat_id) == "idle":
+            if (_quer_iniciar_check(text) or text.strip().lower() == HOME_BUTTON_REVISAR.lower()) and get_session_state(chat_id) == "idle":
                 handled = await iniciar_revisao_check_manual(chat_id)
                 if handled:
                     return

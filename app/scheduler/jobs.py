@@ -45,6 +45,7 @@ from app.agent.copy import (
 )
 from app.models.tool_call_log import ToolCallLog
 from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
+from app.agent.tools import briefing_do_dia, sincronizar_categorias_pendentes
 
 logger = logging.getLogger(__name__)
 
@@ -292,81 +293,24 @@ async def briefing_diario(forçar_envio: bool = False):
 
     db = SessionLocal()
     try:
-        agora = datetime.now(TIMEZONE)
-        inicio_dia = agora.replace(hour=0, minute=0, second=0, microsecond=0)
-        fim_dia = agora.replace(hour=23, minute=59, second=59, microsecond=0)
+        sincronizar_categorias_pendentes(db)
+        user_ids = [row[0] for row in db.query(Task.user_id).filter(Task.status == "pending").distinct().all()]
 
-        # Garante que os datetimes são aware
-        if inicio_dia.tzinfo is None:
-            inicio_dia = TIMEZONE.localize(inicio_dia.replace(tzinfo=None))
-            fim_dia = TIMEZONE.localize(fim_dia.replace(tzinfo=None))
-
-        # #2A — Query 1: tarefas COM data para hoje
-        tarefas_com_data = (
-            db.query(Task)
-            .filter(
-                Task.status == "pending",
-                Task.due_date >= inicio_dia,
-                Task.due_date <= fim_dia,
-            )
-            .all()
-        )
-
-        # #2A — Query 2: tarefas SEM data (due_date IS NULL)
-        tarefas_sem_data = (
-            db.query(Task)
-            .filter(
-                Task.status == "pending",
-                Task.due_date.is_(None),
-            )
-            .all()
-        )
-
-        todas_tarefas = tarefas_com_data + tarefas_sem_data
-
-        if not todas_tarefas:
+        if not user_ids:
             if forçar_envio:
-                # #2C — Envia mensagem de "dia livre"
                 logger.info("[Scheduler] Sem tarefas, enviando 'dia livre'")
-                # Precisamos descobrir usuários ativos para enviar
-                # (busca últimos usuários que interagiram)
                 await _enviar_briefing_vazio()
             else:
                 logger.info("[Scheduler] Sem tarefas para hoje, briefing pulado")
             return
 
-        # Agrupa por usuário — tarefas com horário primeiro (ordenadas), sem prazo no final
-        usuarios: dict[str, list[tuple]] = {}
-        for tarefa in todas_tarefas:
-            if tarefa.user_id not in usuarios:
-                usuarios[tarefa.user_id] = []
-            if tarefa.due_date:
-                dt = tarefa.due_date
-                if dt.tzinfo is None:
-                    dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
-                else:
-                    dt = dt.astimezone(TIMEZONE)
-                sort_key = dt
-                if dt.hour == 0 and dt.minute == 0:
-                    linha = tarefa.title
-                else:
-                    linha = f"{dt.strftime('%H:%M')} — {tarefa.title}"
-            else:
-                sort_key = None
-                linha = tarefa.title
-            usuarios[tarefa.user_id].append((sort_key, linha))
-
-        for user_id, tarefas_raw in usuarios.items():
-            # Ordena: com horário primeiro (crescente), sem prazo no final
-            tarefas_raw.sort(key=lambda x: (x[0] is None, x[0] or datetime.min))
-            tarefas = [texto for _, texto in tarefas_raw]
-            enviado = await enviar_briefing(user_id, tarefas)
+        for user_id in user_ids:
+            texto = briefing_do_dia(user_id)
+            enviado = await enviar_briefing(user_id, texto)
             if enviado:
-                logger.info(f"[Scheduler] Briefing enviado para {user_id} ({len(tarefas)} tarefas)")
+                logger.info(f"[Scheduler] Briefing enviado para {user_id}")
             else:
-                logger.warning(
-                    f"[Scheduler] Falha ao enviar briefing para {user_id}"
-                )
+                logger.warning(f"[Scheduler] Falha ao enviar briefing para {user_id}")
 
     except Exception as e:
         logger.error(f"[Scheduler] Erro ao enviar briefing: {e}")
@@ -460,6 +404,7 @@ def buscar_tarefas_hoje(user_id: str, only_past: bool = False) -> list:
     """
     db = SessionLocal()
     try:
+        sincronizar_categorias_pendentes(db, user_id=user_id)
         from app.agent.tools import intervalo_dia_logico
         agora = datetime.now(TIMEZONE)
         inicio, fim = intervalo_dia_logico(agora)

@@ -38,17 +38,32 @@ from app.agent.tools import (
     _validar_argumentos,
     TIMEZONE,
     complete_task_by_id,
+    list_reminders,
+    list_tasks,
+    resumo_backlog,
+    resumo_hoje,
     reschedule_task,
+    save_task,
 )
 from app.agent.prompts import get_system_prompt, get_planning_prompt
 from app.agent.session import get_session_state, get_session_context, set_session_state
 from app.agent.copy import (
+    HOME_BUTTON_ADICIONAR,
+    HOME_BUTTON_BACKLOG,
+    HOME_BUTTON_HOJE,
+    HOME_BUTTON_LEMBRETES,
+    HOME_BUTTON_PLANEJAR,
+    HOME_BUTTON_REVISAR,
     mensagem_abertura_planejamento,
+    mensagem_atalho_ligado,
     mensagem_cancelamento,
+    mensagem_captura_tarefa,
     mensagem_confirmacao_revisao,
+    mensagem_home,
     mensagem_pergunta_data_planejamento,
     mensagem_revisao_aplicada,
     mensagem_revisao_sem_match,
+    mensagem_tarefa_backlog_salva,
 )
 from app.db.database import SessionLocal
 from app.models.conversation import ConversationHistory
@@ -164,6 +179,21 @@ def _quer_iniciar_check(mensagem: str) -> bool:
         if re.search(pattern, msg_lower):
             return True
     return False
+
+
+def _home_action(mensagem: str) -> str | None:
+    msg = mensagem.strip().lower()
+    mapping = {
+        HOME_BUTTON_HOJE.lower(): "today",
+        HOME_BUTTON_PLANEJAR.lower(): "planning",
+        HOME_BUTTON_REVISAR.lower(): "review",
+        HOME_BUTTON_BACKLOG.lower(): "backlog",
+        HOME_BUTTON_ADICIONAR.lower(): "add_task",
+        HOME_BUTTON_LEMBRETES.lower(): "reminders",
+        "/start": "home",
+        "/home": "home",
+    }
+    return mapping.get(msg)
 
 
 def _quer_sair_planejamento(mensagem: str) -> bool:
@@ -570,6 +600,79 @@ def _tratar_confirmacao_revisao(user_id: str, mensagem: str, contexto: dict) -> 
     return "Se quiser ajustar, me fala algo como 'deixa estudo pendente' ou 'move o resto pra amanhã'. Se estiver certo, manda um ok."
 
 
+def _handle_home_action(action: str, user_id: str, mensagem: str) -> str:
+    from app.scheduler.jobs import iniciar_revisao_check
+
+    if action == "home":
+        set_session_state(user_id, "idle")
+        return mensagem_home()
+
+    if action == "today":
+        set_session_state(user_id, "idle")
+        return resumo_hoje(user_id)
+
+    if action == "backlog":
+        set_session_state(user_id, "idle")
+        return resumo_backlog(user_id)
+
+    if action == "reminders":
+        set_session_state(user_id, "idle")
+        return list_reminders(user_id)
+
+    if action == "add_task":
+        set_session_state(
+            user_id,
+            "adding_task",
+            context={"entry_mode": "home_add_task"},
+            replace_context=True,
+        )
+        return mensagem_captura_tarefa()
+
+    if action == "review":
+        handled, resposta = iniciar_revisao_check(user_id)
+        if handled:
+            return resposta
+        return mensagem_atalho_ligado(HOME_BUTTON_REVISAR)
+
+    if action == "planning":
+        set_session_state(user_id, "idle")
+        if _quer_iniciar_planejamento("/planejar"):
+            limpar_historico_planning(user_id)
+            agora = datetime.now(TIMEZONE)
+            target_date = (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d") if _checkin_alcancado(agora) else None
+            if target_date:
+                set_session_state(
+                    user_id,
+                    "planning",
+                    context={
+                        "target_date": target_date,
+                        "awaiting_target_date": False,
+                        "review_done": False,
+                        "remaining_pending": [],
+                    },
+                    replace_context=True,
+                )
+                resposta = _mensagem_inicio_planejamento(target_date)
+            else:
+                set_session_state(
+                    user_id,
+                    "planning",
+                    context={
+                        "target_date": None,
+                        "awaiting_target_date": True,
+                        "review_done": False,
+                        "remaining_pending": [],
+                    },
+                    replace_context=True,
+                )
+                resposta = _pergunta_data_planejamento()
+            salvar_historico(user_id, "plan_user", mensagem)
+            salvar_historico(user_id, "plan_asst", resposta)
+            return resposta
+
+    return mensagem_home()
+
+
 # ============================================================
 # HISTÓRICO
 # ============================================================
@@ -903,6 +1006,10 @@ def chat(mensagem: str, user_id: str) -> str:
     historico = carregar_historico(user_id)
     state = get_session_state(user_id)
     session_context = get_session_context(user_id)
+    home_action = _home_action(mensagem)
+
+    if home_action:
+        return _handle_home_action(home_action, user_id, mensagem)
 
     # Acionamento manual do planejamento — só dispara se usuário está idle.
     # Se já está em planning/reviewing_tasks, ignora (não reseta histórico).
@@ -950,6 +1057,19 @@ def chat(mensagem: str, user_id: str) -> str:
         handled, resposta = iniciar_revisao_check(user_id)
         if handled:
             return resposta
+
+    if state == "adding_task":
+        if _quer_sair_planejamento(mensagem):
+            set_session_state(user_id, "idle")
+            return mensagem_cancelamento()
+        resultado = save_task(mensagem.strip(), user_id=user_id, due_date=None)
+        set_session_state(user_id, "idle")
+        titulo = mensagem.strip()
+        if "Erro" in resultado or "erro" in resultado.lower():
+            return resultado
+        if "já existe" in resultado.lower():
+            return resultado
+        return mensagem_tarefa_backlog_salva(titulo)
 
     if state == "reviewing_tasks":
         if _quer_sair_planejamento(mensagem):

@@ -8,13 +8,18 @@ de mensagens longas.
 
 import logging
 import os
-from datetime import datetime
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import TelegramError
 from app.agent.copy import (
-    formatar_data_legivel,
+    HOME_BUTTON_ADICIONAR,
+    HOME_BUTTON_BACKLOG,
+    HOME_BUTTON_HOJE,
+    HOME_BUTTON_LEMBRETES,
+    HOME_BUTTON_PLANEJAR,
+    HOME_BUTTON_REVISAR,
     mensagem_abertura_planejamento,
     mensagem_briefing,
+    mensagem_home,
     mensagem_pergunta_data_planejamento,
 )
 
@@ -36,7 +41,19 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 _revisao_state: dict[str, dict] = {}
 
 
-async def enviar_mensagem(chat_id: str, texto: str) -> bool:
+def teclado_home() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(HOME_BUTTON_HOJE), KeyboardButton(HOME_BUTTON_PLANEJAR)],
+            [KeyboardButton(HOME_BUTTON_REVISAR), KeyboardButton(HOME_BUTTON_BACKLOG)],
+            [KeyboardButton(HOME_BUTTON_ADICIONAR), KeyboardButton(HOME_BUTTON_LEMBRETES)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+async def enviar_mensagem(chat_id: str, texto: str, *, incluir_home: bool = True) -> bool:
     """
     Envia uma mensagem simples para um chat do Telegram.
     Tenta até 3 vezes com intervalo de 2s em caso de falha.
@@ -48,7 +65,10 @@ async def enviar_mensagem(chat_id: str, texto: str) -> bool:
     tentativas = 3
     for tentativa in range(1, tentativas + 1):
         try:
-            await bot.send_message(chat_id=chat_id, text=texto)
+            kwargs = {"chat_id": chat_id, "text": texto}
+            if incluir_home:
+                kwargs["reply_markup"] = teclado_home()
+            await bot.send_message(**kwargs)
             if tentativa > 1:
                 logger.info(f"Mensagem enviada para {chat_id} na tentativa {tentativa}.")
             return True
@@ -61,7 +81,7 @@ async def enviar_mensagem(chat_id: str, texto: str) -> bool:
     return False
 
 
-async def enviar_mensagem_longa(chat_id: str, texto: str) -> bool:
+async def enviar_mensagem_longa(chat_id: str, texto: str, *, incluir_home: bool = True) -> bool:
     """
     Envia uma mensagem para o Telegram, dividindo automaticamente
     se o texto ultrapassar o limite de 4096 caracteres.
@@ -74,7 +94,7 @@ async def enviar_mensagem_longa(chat_id: str, texto: str) -> bool:
         True se todas as partes foram enviadas, False caso contrário.
     """
     if len(texto) <= MAX_MESSAGE_LENGTH:
-        return await enviar_mensagem(chat_id, texto)
+        return await enviar_mensagem(chat_id, texto, incluir_home=incluir_home)
 
     # Divide o texto em partes
     sucesso = True
@@ -88,7 +108,11 @@ async def enviar_mensagem_longa(chat_id: str, texto: str) -> bool:
         if len(partes) > 1 and i < len(partes):
             parte = parte + "\n\n(continuando...)"
 
-        enviado = await enviar_mensagem(chat_id, parte)
+        enviado = await enviar_mensagem(
+            chat_id,
+            parte,
+            incluir_home=incluir_home if i == len(partes) else False,
+        )
         if not enviado:
             sucesso = False
             logger.warning(
@@ -112,7 +136,7 @@ async def enviar_lembrete(chat_id: str, mensagem: str) -> bool:
     texto = f"⏰ *Lembrete*\n\n{mensagem}"
     try:
         await bot.send_message(
-            chat_id=chat_id, text=texto, parse_mode="Markdown"
+            chat_id=chat_id, text=texto, parse_mode="Markdown", reply_markup=teclado_home()
         )
         return True
 
@@ -121,7 +145,7 @@ async def enviar_lembrete(chat_id: str, mensagem: str) -> bool:
         # Tenta enviar sem formatação Markdown
         try:
             texto_sem_md = f"⏰ Lembrete\n\n{mensagem}"
-            await bot.send_message(chat_id=chat_id, text=texto_sem_md)
+            await bot.send_message(chat_id=chat_id, text=texto_sem_md, reply_markup=teclado_home())
             return True
         except TelegramError as e2:
             logger.warning(
@@ -257,3 +281,7 @@ async def enviar_briefing(chat_id: str, tarefas: list[str]) -> bool:
         True se o briefing foi enviado com sucesso.
     """
     return await enviar_mensagem(chat_id, mensagem_briefing(tarefas))
+
+
+async def enviar_home(chat_id: str) -> bool:
+    return await enviar_mensagem(chat_id, mensagem_home())

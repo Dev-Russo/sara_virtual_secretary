@@ -12,6 +12,10 @@ async def _mock_send(*args, **kwargs):
         print(f"\n[Sara]: {text}")
         for row in reply_markup.inline_keyboard:
             print("  " + "  ".join(f"[{btn.text}]" for btn in row))
+    elif reply_markup and hasattr(reply_markup, "keyboard"):
+        print(f"\n[Sara]: {text}")
+        for row in reply_markup.keyboard:
+            print("  " + "  ".join(f"[{btn.text}]" for btn in row))
     else:
         print(f"\n[Sara]: {text}")
     print()

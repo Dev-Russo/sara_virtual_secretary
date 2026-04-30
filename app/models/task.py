@@ -11,6 +11,7 @@ class Task(Base):
     user_id = Column(String(20), nullable=False)
     title = Column(Text, nullable=False)
     due_date = Column(DateTime(timezone=True), nullable=True)
+    category = Column(String(20), nullable=True)
     priority = Column(String(10), default="medium")
     status = Column(String(15), default="pending")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
