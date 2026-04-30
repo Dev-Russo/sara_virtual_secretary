@@ -80,6 +80,19 @@ def _due_date_key(valor: datetime | None) -> str | None:
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
+def _formatar_prazo_tarefa(valor: datetime | None) -> str:
+    if not valor:
+        return "sem prazo definido"
+    dt = valor
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
+    else:
+        dt = dt.astimezone(TIMEZONE)
+    if dt.hour == 0 and dt.minute == 0:
+        return dt.strftime("%d/%m/%Y")
+    return dt.strftime("%d/%m/%Y às %H:%M")
+
+
 def _buscar_tarefa_duplicada(db, user_id: str, title: str, due_date: datetime | None) -> Task | None:
     titulo_norm = _normalizar_titulo(title)
     due_key = _due_date_key(due_date)
@@ -280,6 +293,24 @@ def obter_grupos_tarefas(user_id: str, *, sync: bool = True, agora: datetime | N
         db.close()
 
 
+def tarefas_backlog_pendentes(user_id: str) -> list[Task]:
+    db = SessionLocal()
+    try:
+        sincronizar_categorias_pendentes(db, user_id=user_id)
+        return (
+            db.query(Task)
+            .filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.due_date == None,
+            )
+            .order_by(Task.created_at.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+
 def resumo_hoje(user_id: str) -> str:
     grupos = obter_grupos_tarefas(user_id)
     return _formatar_grupos_tarefas(grupos, cabecalho="Hoje tá assim:")
@@ -424,7 +455,7 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
 
         existente = _buscar_tarefa_duplicada(db, user_id, title.strip(), parsed_date)
         if existente:
-            prazo = f" para {existente.due_date.strftime('%d/%m/%Y às %H:%M')}" if existente.due_date else " sem prazo definido"
+            prazo = f" para {_formatar_prazo_tarefa(existente.due_date)}" if existente.due_date else " sem prazo definido"
             return f"Tarefa '{existente.title}' já existe{prazo}."
 
         task = Task(
@@ -439,7 +470,7 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
         db.commit()
         db.refresh(task)
 
-        prazo = f" para {parsed_date.strftime('%d/%m/%Y às %H:%M')}" if parsed_date else " sem prazo definido"
+        prazo = f" para {_formatar_prazo_tarefa(parsed_date)}" if parsed_date else " sem prazo definido"
         categoria = task.category or "backlog"
         return f"Tarefa '{title}' salva com sucesso{prazo}! Categoria: {categoria}."
 
@@ -449,6 +480,57 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
         return f"Erro ao salvar tarefa: {str(e)}"
     finally:
         db.close()
+
+
+def save_tasks(
+    titles: list[str],
+    user_id: str,
+    due_date: str = None,
+    priority: str = "medium",
+) -> str:
+    salvas: list[str] = []
+    existentes: list[str] = []
+    erros: list[str] = []
+    for title in titles:
+        result = save_task(title=title, user_id=user_id, due_date=due_date, priority=priority)
+        result_lower = result.lower()
+        if "erro" in result_lower:
+            erros.append(result)
+        elif "já existe" in result_lower:
+            existentes.append(title)
+        else:
+            salvas.append(title)
+
+    partes: list[str] = []
+    if salvas:
+        partes.append("Salvei: " + ", ".join(salvas) + ".")
+    if existentes:
+        partes.append("Já estavam salvas: " + ", ".join(existentes) + ".")
+    if erros:
+        partes.append("Erros: " + " | ".join(erros))
+    return " ".join(partes) if partes else "Nenhuma tarefa foi salva."
+
+
+def reschedule_tasks_by_ids(task_ids: list[str], user_id: str, new_due_date: str) -> str:
+    if not task_ids:
+        return "Nenhuma tarefa selecionada para reagendar."
+
+    moved: list[str] = []
+    errors: list[str] = []
+    for task_id in task_ids:
+        result = reschedule_task(str(task_id), user_id, new_due_date)
+        if "erro" in result.lower() or "nenhuma tarefa" in result.lower():
+            errors.append(result)
+        else:
+            match = re.search(r"Tarefa '(.+?)' reagendada", result)
+            moved.append(match.group(1) if match else str(task_id))
+
+    partes: list[str] = []
+    if moved:
+        partes.append("Reagendei: " + ", ".join(moved) + ".")
+    if errors:
+        partes.append("Algumas não foram movidas: " + " | ".join(errors))
+    return " ".join(partes) if partes else "Não consegui reagendar as tarefas."
 
 
 def create_reminder(message: str, user_id: str, remind_at: str) -> str:
@@ -767,7 +849,7 @@ def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
 
         return (
             f"Tarefa '{task.title}' reagendada para "
-            f"{task.due_date.astimezone(TIMEZONE).strftime('%d/%m/%Y às %H:%M')}."
+            f"{_formatar_prazo_tarefa(task.due_date)}."
         )
     except Exception as e:
         db.rollback()
@@ -829,6 +911,11 @@ def finalizar_planejamento(user_id: str, tarefas: list = None) -> str:
         db.commit()
         set_session_state(user_id, "idle", context={"last_completed_flow": "planning"})
 
+        if salvas and ignoradas:
+            return (
+                f"Fechei seu plano. Salvei {len(salvas)} tarefa(s): {', '.join(salvas)}. "
+                f"Já estavam salvas para esse dia: {', '.join(ignoradas)}."
+            )
         if salvas:
             return f"Fechei seu plano. Salvei {len(salvas)} tarefa(s): {', '.join(salvas)}."
         if ignoradas:
@@ -975,42 +1062,11 @@ TOOLS_SCHEMA: list[dict] = [
         },
     },
     {
-        "name": "complete_tasks_in_period",
-        "description": (
-            "Marca em massa tarefas pendentes como concluídas, mas SOMENTE dentro de um período explícito. "
-            "Nunca use sem period ou start_date. Nunca conclua todas as tarefas abertas do sistema. "
-            "Use apenas quando o usuário especificar hoje, ontem, esta semana, semana passada ou uma data."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "period": {
-                    "type": "string",
-                    "enum": ["today", "yesterday", "this_week", "last_week"],
-                    "description": "Período explícito escolhido pelo usuário.",
-                },
-                "start_date": {
-                    "type": "string",
-                    "description": "Data inicial em YYYY-MM-DD quando o usuário citar uma data específica.",
-                },
-                "end_date": {
-                    "type": "string",
-                    "description": "Data final em YYYY-MM-DD. Se omitida, usa start_date como dia único.",
-                },
-                "include_backlog": {
-                    "type": "boolean",
-                    "description": "Inclui backlog sem data apenas se o usuário pedir explicitamente.",
-                },
-            },
-            "required": [],
-        },
-    },
-    {
         "name": "complete_task",
         "description": (
             "Marca uma tarefa específica como concluída. "
             "Use quando o usuário mencionar uma tarefa específica que terminou. "
-            "Para marcar várias de uma vez, só use complete_tasks_in_period se houver período explícito."
+            "Para marcar várias de uma vez, não tente concluir em lote por conta própria; peça o período se faltar contexto."
         ),
         "input_schema": {
             "type": "object",
@@ -1125,7 +1181,6 @@ FINALIZAR_PLANEJAMENTO_SCHEMA = {
 PLANNING_TOOLS_SCHEMA = [
     t for t in TOOLS_SCHEMA if t["name"] not in (
         "save_task",
-        "complete_tasks_in_period",
         "delete_task",
         "delete_all_tasks",
     )

@@ -40,12 +40,13 @@ from app.agent.sara_agent import limpar_historico_planning
 from app.agent.copy import (
     mensagem_abertura_planejamento,
     mensagem_pergunta_data_planejamento,
+    mensagem_revisao_backlog_disponivel,
     mensagem_revisao_check,
     mensagem_revisao_planejamento,
 )
 from app.models.tool_call_log import ToolCallLog
 from app.config import BRIEFING_HORA, CHECKIN_HORA, ALLOWED_CHAT_ID
-from app.agent.tools import briefing_do_dia, sincronizar_categorias_pendentes
+from app.agent.tools import briefing_do_dia, sincronizar_categorias_pendentes, tarefas_backlog_pendentes
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,16 @@ async def abrir_fluxo_pos_revisao(user_id: str) -> None:
 def iniciar_revisao_check(user_id: str) -> tuple[bool, str]:
     tarefas_hoje = buscar_tarefas_hoje(user_id, only_past=False)
     if not tarefas_hoje:
+        backlog = tarefas_backlog_pendentes(user_id)
+        if backlog:
+            review_tasks = _serializar_tarefas_revisao(backlog)
+            set_session_state(
+                user_id,
+                "confirming_backlog_review",
+                context={"backlog_review_tasks": review_tasks},
+                replace_context=True,
+            )
+            return True, mensagem_revisao_backlog_disponivel(review_tasks)
         return True, mensagem_revisao_check([])
 
     review_session_id, contexto = _novo_contexto_revisao(
@@ -203,6 +214,17 @@ def iniciar_revisao_check(user_id: str) -> tuple[bool, str]:
 async def iniciar_revisao_check_manual(user_id: str) -> bool:
     tarefas_hoje = buscar_tarefas_hoje(user_id, only_past=False)
     if not tarefas_hoje:
+        backlog = tarefas_backlog_pendentes(user_id)
+        if backlog:
+            review_tasks = _serializar_tarefas_revisao(backlog)
+            set_session_state(
+                user_id,
+                "confirming_backlog_review",
+                context={"backlog_review_tasks": review_tasks},
+                replace_context=True,
+            )
+            await enviar_mensagem(user_id, mensagem_revisao_backlog_disponivel(review_tasks))
+            return True
         await enviar_mensagem(user_id, mensagem_revisao_check([]))
         return True
 

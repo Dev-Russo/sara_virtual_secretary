@@ -43,8 +43,11 @@ from app.agent.tools import (
     list_tasks,
     resumo_backlog,
     resumo_hoje,
+    reschedule_tasks_by_ids,
     reschedule_task,
     save_task,
+    save_tasks,
+    tarefas_backlog_pendentes,
     tarefas_pendentes_no_periodo,
 )
 from app.agent.prompts import get_system_prompt, get_planning_prompt
@@ -64,6 +67,7 @@ from app.agent.copy import (
     mensagem_home,
     mensagem_pergunta_data_planejamento,
     mensagem_revisao_aplicada,
+    mensagem_revisao_backlog_disponivel,
     mensagem_revisao_sem_match,
     mensagem_tarefa_backlog_salva,
 )
@@ -141,6 +145,15 @@ ADD_TASK_PATTERNS = [
     r"^(?P<title>.+?)\s+adicione\s+(?:a\s+)?tarefa\b.*$",
     r"^(?:outra\s+tarefa\s+)?(?:para\s+)?adicionar\s+(?:é|eh|:)?\s*(?P<title>.+)$",
     r"^(?:adicione|adicionar|crie|salve)\s+(?:a\s+)?tarefa\s+(?:de\s+)?(?P<title>.+)$",
+    r"^(?:adicione|adicionar|crie|salve)\s+(?:para|pra)\s+(?:hoje|amanh[aã])\s+(?P<title>.+)$",
+    r"^(?:para|pra)\s+(?:hoje|amanh[aã])\s+(?:adicione|adicionar|crie|salve)\s+(?P<title>.+)$",
+    r"^(?:hoje|amanh[aã])\s+(?:preciso|quero|tenho que|tenho de)\s+(?P<title>.+)$",
+    r"^(?:preciso|quero|tenho que|tenho de)\s+(?P<title>.+?)\s+(?:hoje|amanh[aã])$",
+]
+
+RESCHEDULE_BACKLOG_PATTERNS = [
+    r"\b(resgata|resgate|move|mova|joga|jogue|passa|passe|reagenda|reagende)\b.*\b(hoje|amanh[aã])\b",
+    r"\b(hoje|amanh[aã])\b.*\b(resgata|resgate|move|mova|joga|jogue|passa|passe|reagenda|reagende)\b",
 ]
 
 
@@ -354,7 +367,21 @@ def _precisa_listar_tarefas(mensagem: str) -> bool:
     return False
 
 
-def _extrair_tarefa_para_salvar(mensagem: str) -> tuple[str, str | None] | None:
+def _limpar_titulo_extraido(title: str, mensagem: str) -> str:
+    title = title.strip(" .")
+    title = re.sub(r"\b(por favor|pra mim|para mim|no caso)\b", "", title, flags=re.IGNORECASE).strip(" .")
+    for trecho in ("amanhã", "amanha", "hoje", "ontem", "para hoje", "pra hoje", "para amanhã", "pra amanhã", "para amanha", "pra amanha"):
+        title = re.sub(rf"\b{trecho}\b", "", title, flags=re.IGNORECASE).strip(" .")
+    title = re.sub(r"\s+", " ", title)
+    return title
+
+
+def _split_titulos(titulo: str) -> list[str]:
+    partes = re.split(r"\s*,\s*|\s+;\s+|\s+\be\b\s+", titulo)
+    return [parte.strip(" .") for parte in partes if len(parte.strip(" .")) >= 3]
+
+
+def _extrair_tarefas_para_salvar(mensagem: str) -> tuple[list[str], str | None] | None:
     msg_lower = mensagem.lower()
     if "lembrete" in msg_lower:
         return None
@@ -363,27 +390,32 @@ def _extrair_tarefa_para_salvar(mensagem: str) -> tuple[str, str | None] | None:
         match = re.search(pattern, mensagem.strip(), flags=re.IGNORECASE)
         if not match:
             continue
-        title = match.group("title").strip(" .")
-        title = re.sub(r"\b(por favor|pra mim|para mim)\b", "", title, flags=re.IGNORECASE).strip(" .")
+        title = _limpar_titulo_extraido(match.group("title"), mensagem)
         due_date = _parse_data_explicita(mensagem)
-        for trecho in ("amanhã", "amanha", "hoje", "ontem"):
-            title = re.sub(rf"\b{trecho}\b", "", title, flags=re.IGNORECASE).strip(" .")
-        title = re.sub(r"\s+", " ", title)
-        if len(title) >= 3:
-            return title, due_date
+        titles = _split_titulos(title)
+        if titles:
+            return titles, due_date
     return None
 
 
-def _formatar_confirmacao_tarefa_salva(title: str, due_date: str | None, resultado: str) -> str:
-    if "erro" in resultado.lower() or "já existe" in resultado.lower():
+def _formatar_confirmacao_tarefas_salvas(titles: list[str], due_date: str | None, resultado: str) -> str:
+    resultado_lower = resultado.lower()
+    if "erro" in resultado_lower or "já exist" in resultado_lower:
         return resultado
     if not due_date:
-        return mensagem_tarefa_backlog_salva(title)
+        if len(titles) == 1:
+            return mensagem_tarefa_backlog_salva(titles[0])
+        return "Anotei no backlog: " + ", ".join(titles) + ". Depois a gente encaixa isso num dia."
     try:
         display = datetime.strptime(due_date, "%Y-%m-%d").strftime("%d/%m/%Y")
     except ValueError:
         display = due_date
-    return f"Anotei: {title} para {display}."
+    return f"Anotei para {display}: " + ", ".join(titles) + "."
+
+
+def _quer_reagendar_backlog(mensagem: str) -> bool:
+    msg = _normalizar(mensagem)
+    return any(re.search(pattern, msg) for pattern in RESCHEDULE_BACKLOG_PATTERNS)
 
 
 def _calcular_data_filtro(mensagem: str) -> str | None:
@@ -492,6 +524,100 @@ def _buscar_tarefas_revisao(user_id: str, task_ids: list[str]) -> list[Task]:
         return tarefas
     finally:
         db.close()
+
+
+def _serializar_tarefas_revisao(tarefas: list[Task]) -> list[dict]:
+    return [{"task_id": str(task.id), "title": task.title} for task in tarefas]
+
+
+def _contexto_revisao(
+    tarefas: list[Task],
+    *,
+    review_mode: str,
+    target_date: str | None = None,
+    awaiting_target_date: bool = False,
+) -> dict:
+    review_tasks = _serializar_tarefas_revisao(tarefas)
+    return {
+        "review_session_id": uuid.uuid4().hex[:16],
+        "review_mode": review_mode,
+        "review_task_ids": [task["task_id"] for task in review_tasks],
+        "review_tasks": review_tasks,
+        "review_task_status_map": {task["task_id"]: False for task in review_tasks},
+        "target_date": target_date,
+        "awaiting_target_date": awaiting_target_date,
+        "review_done": False,
+        "remaining_pending": [],
+    }
+
+
+def _perguntar_revisao_backlog(user_id: str) -> str | None:
+    tarefas = tarefas_backlog_pendentes(user_id)
+    if not tarefas:
+        return None
+    contexto = {
+        "backlog_review_tasks": _serializar_tarefas_revisao(tarefas),
+    }
+    set_session_state(user_id, "confirming_backlog_review", context=contexto, replace_context=True)
+    return mensagem_revisao_backlog_disponivel(contexto["backlog_review_tasks"])
+
+
+def _iniciar_revisao_backlog(user_id: str, contexto: dict) -> str:
+    tarefas = _buscar_tarefas_revisao(
+        user_id,
+        [task["task_id"] for task in contexto.get("backlog_review_tasks", [])],
+    )
+    if not tarefas:
+        set_session_state(user_id, "idle")
+        return "O backlog não tem mais tarefa aberta pra revisar."
+
+    novo_contexto = _contexto_revisao(tarefas, review_mode="check")
+    set_session_state(user_id, "reviewing_tasks", context=novo_contexto, replace_context=True)
+    itens = "\n".join(f"• {task['title']}" for task in novo_contexto["review_tasks"])
+    return f"Fechado. Me fala o que rolou com essas:\n\n{itens}\n\nPode responder livre, tipo 'fiz docker, arquitetura ficou pendente'."
+
+
+def _tratar_confirmacao_revisao_backlog(user_id: str, mensagem: str, contexto: dict) -> str:
+    if _is_affirmative(mensagem):
+        return _iniciar_revisao_backlog(user_id, contexto)
+    if _quer_sair_planejamento(mensagem) or re.search(r"\b(n[aã]o|deixa|cancela)\b", _normalizar(mensagem)):
+        set_session_state(user_id, "idle")
+        return "Fechado, não mexi no backlog."
+    return "Se quiser revisar o backlog, manda um sim. Se não, pode mandar não."
+
+
+def _preparar_reagendamento_backlog(user_id: str, mensagem: str) -> str | None:
+    target_date = _parse_data_explicita(mensagem)
+    if not target_date:
+        return None
+
+    tarefas = tarefas_backlog_pendentes(user_id)
+    if not tarefas:
+        return "Não achei tarefa no backlog pra mover."
+
+    contexto = {
+        "reschedule_task_ids": [str(task.id) for task in tarefas],
+        "reschedule_date": target_date,
+    }
+    set_session_state(user_id, "confirming_reschedule_backlog", context=contexto, replace_context=True)
+    linhas = "\n".join(f"• {task.title}" for task in tarefas)
+    display = datetime.strptime(target_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+    return f"Vou mover este backlog para {display}:\n\n{linhas}\n\nConfirmo?"
+
+
+def _tratar_confirmacao_reagendamento_backlog(user_id: str, mensagem: str, contexto: dict) -> str:
+    if _quer_sair_planejamento(mensagem) or re.search(r"\b(n[aã]o|cancela|deixa)\b", _normalizar(mensagem)):
+        set_session_state(user_id, "idle")
+        return "Fechado, não movi nada."
+
+    if not _is_affirmative(mensagem):
+        return "Se estiver certo mover esse backlog, manda um sim. Se não, manda não."
+
+    target_date = contexto.get("reschedule_date")
+    task_ids = contexto.get("reschedule_task_ids", [])
+    resultado = reschedule_tasks_by_ids(task_ids, user_id, target_date)
+    set_session_state(user_id, "idle")
+    return resultado
 
 
 def _proxima_data_pendente(contexto: dict) -> str | None:
@@ -739,6 +865,10 @@ def _handle_home_action(action: str, user_id: str, mensagem: str) -> str:
     if action == "review":
         handled, resposta = iniciar_revisao_check(user_id)
         if handled:
+            if resposta == "Hoje não achei tarefa aberta pra revisar.":
+                fallback = _perguntar_revisao_backlog(user_id)
+                if fallback:
+                    return fallback
             return resposta
         return mensagem_atalho_ligado(HOME_BUTTON_REVISAR)
 
@@ -1123,7 +1253,7 @@ def chat(mensagem: str, user_id: str) -> str:
     session_context = get_session_context(user_id)
     home_action = _home_action(mensagem)
 
-    if home_action:
+    if home_action and state == "idle":
         return _handle_home_action(home_action, user_id, mensagem)
 
     # Acionamento manual do planejamento — só dispara se usuário está idle.
@@ -1171,6 +1301,10 @@ def chat(mensagem: str, user_id: str) -> str:
         logger.info(f"[Forced routing] Revisão manual iniciada por {user_id}")
         handled, resposta = iniciar_revisao_check(user_id)
         if handled:
+            if resposta == "Hoje não achei tarefa aberta pra revisar.":
+                fallback = _perguntar_revisao_backlog(user_id)
+                if fallback:
+                    return fallback
             return resposta
 
     if state == "adding_task":
@@ -1207,6 +1341,12 @@ def chat(mensagem: str, user_id: str) -> str:
 
     if state == "confirming_bulk_complete":
         return _tratar_confirmacao_conclusao_periodo(user_id, mensagem, session_context)
+
+    if state == "confirming_backlog_review":
+        return _tratar_confirmacao_revisao_backlog(user_id, mensagem, session_context)
+
+    if state == "confirming_reschedule_backlog":
+        return _tratar_confirmacao_reagendamento_backlog(user_id, mensagem, session_context)
 
     # Modo planejamento: usa histórico isolado para não contaminar contexto normal
     if state == "planning":
@@ -1271,11 +1411,18 @@ def chat(mensagem: str, user_id: str) -> str:
         salvar_historico(user_id, "assistant", resposta)
         return resposta
 
-    pedido_tarefa = _extrair_tarefa_para_salvar(mensagem)
+    if _quer_reagendar_backlog(mensagem):
+        resposta = _preparar_reagendamento_backlog(user_id, mensagem)
+        if resposta:
+            salvar_historico(user_id, "user", mensagem)
+            salvar_historico(user_id, "assistant", resposta)
+            return resposta
+
+    pedido_tarefa = _extrair_tarefas_para_salvar(mensagem)
     if pedido_tarefa:
-        title, due_date = pedido_tarefa
-        resultado = save_task(title, user_id=user_id, due_date=due_date)
-        resposta = _formatar_confirmacao_tarefa_salva(title, due_date, resultado)
+        titles, due_date = pedido_tarefa
+        resultado = save_tasks(titles, user_id=user_id, due_date=due_date)
+        resposta = _formatar_confirmacao_tarefas_salvas(titles, due_date, resultado)
         salvar_historico(user_id, "user", mensagem)
         salvar_historico(user_id, "assistant", resposta)
         return resposta
@@ -1288,31 +1435,9 @@ def chat(mensagem: str, user_id: str) -> str:
             "list_tasks", {"filter_date": filter_date} if filter_date else {},
             user_id=user_id,
         )
-
-        # Embed tool result in user message — não usa histórico para evitar alucinação
-        context = (
-            f"{mensagem}\n\n"
-            f"[DADOS DO BANCO — use EXATAMENTE estes dados, não invente nada]\n"
-            f"{tool_result}\n\n"
-            f"Formate de forma amigável. NÃO invente tarefas que não estão acima. "
-            f"NÃO omita tarefas que estão acima."
-        )
-
-        try:
-            response = anthropic_client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=ANTHROPIC_MAX_TOKENS,
-                system=system_prompt,
-                messages=[{"role": "user", "content": context}],
-            )
-            resposta = _extrair_texto(response.content)
-        except Exception as e:
-            logger.error(f"[chat] Erro na chamada Anthropic (forced routing): {e}")
-            resposta = _corrigir_resposta_sem_grounding(tool_result, mensagem)
-
         salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", resposta)
-        return resposta
+        salvar_historico(user_id, "assistant", tool_result)
+        return tool_result
 
     # ========================================
     # Caminho normal: LLM decide se usa tool
@@ -1357,7 +1482,7 @@ def chat(mensagem: str, user_id: str) -> str:
             messages.append({"role": "user", "content": result_contents})
 
             # Para operações de escrita, reforça no system prompt da segunda chamada
-            WRITE_TOOLS = {"save_task", "create_reminder", "complete_task", "complete_tasks_in_period", "reschedule_task"}
+            WRITE_TOOLS = {"save_task", "create_reminder", "complete_task", "reschedule_task"}
             system2 = system_prompt
             if tools_usadas & WRITE_TOOLS:
                 system2 += (

@@ -92,6 +92,15 @@ def mensagem_revisao_check(tarefas: list[dict]) -> str:
     )
 
 
+def mensagem_revisao_backlog_disponivel(tarefas: list[dict]) -> str:
+    itens = "\n".join(f"• {t['title']}" for t in tarefas)
+    return (
+        "Hoje não tem tarefa datada pra revisar, mas tem isso no backlog:\n\n"
+        f"{itens}\n\n"
+        "Quer revisar essas também?"
+    )
+
+
 def mensagem_revisao_sem_match() -> str:
     return (
         "Não consegui bater isso com as tarefas ainda. Me fala mais direto tipo: 'fiz treino, não estudei'."
