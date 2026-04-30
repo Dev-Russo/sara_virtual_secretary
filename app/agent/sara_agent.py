@@ -152,8 +152,8 @@ ADD_TASK_PATTERNS = [
 ]
 
 RESCHEDULE_BACKLOG_PATTERNS = [
-    r"\b(resgata|resgate|move|mova|joga|jogue|passa|passe|reagenda|reagende)\b.*\b(hoje|amanh[aã])\b",
-    r"\b(hoje|amanh[aã])\b.*\b(resgata|resgate|move|mova|joga|jogue|passa|passe|reagenda|reagende)\b",
+    r"\b(resgata|resgate|resgatar|move|mova|mover|joga|jogue|jogar|passa|passe|passar|reagenda|reagende|reagendar)\b.*\b(hoje|amanh[aã]|\d{1,2}/\d{1,2}(?:/\d{4})?|\d{4}-\d{2}-\d{2})\b",
+    r"\b(hoje|amanh[aã]|\d{1,2}/\d{1,2}(?:/\d{4})?|\d{4}-\d{2}-\d{2})\b.*\b(resgata|resgate|resgatar|move|mova|mover|joga|jogue|jogar|passa|passe|passar|reagenda|reagende|reagendar)\b",
 ]
 
 
@@ -415,6 +415,8 @@ def _formatar_confirmacao_tarefas_salvas(titles: list[str], due_date: str | None
 
 def _quer_reagendar_backlog(mensagem: str) -> bool:
     msg = _normalizar(mensagem)
+    if not re.search(r"\bbacklog\b", msg):
+        return False
     return any(re.search(pattern, msg) for pattern in RESCHEDULE_BACKLOG_PATTERNS)
 
 
@@ -597,12 +599,34 @@ def _preparar_reagendamento_backlog(user_id: str, mensagem: str) -> str | None:
 
     contexto = {
         "reschedule_task_ids": [str(task.id) for task in tarefas],
+        "reschedule_tasks": _serializar_tarefas_revisao(tarefas),
         "reschedule_date": target_date,
     }
     set_session_state(user_id, "confirming_reschedule_backlog", context=contexto, replace_context=True)
-    linhas = "\n".join(f"• {task.title}" for task in tarefas)
+    linhas = "\n".join(f"{idx}. {task.title}" for idx, task in enumerate(tarefas, start=1))
     display = datetime.strptime(target_date, "%Y-%m-%d").strftime("%d/%m/%Y")
-    return f"Vou mover este backlog para {display}:\n\n{linhas}\n\nConfirmo?"
+    return (
+        f"Quais tarefas do backlog entram em {display}?\n\n"
+        f"{linhas}\n\n"
+        "Me manda os números ou os nomes. Se forem todas, responde \"todas\"."
+    )
+
+
+def _selecionar_tarefas_reagendamento_backlog(mensagem: str, tarefas: list[dict]) -> list[str]:
+    msg = _normalizar(mensagem)
+    if re.search(r"\b(todas|todos|tudo)\b", msg):
+        return [task["task_id"] for task in tarefas]
+
+    selecionadas: list[str] = []
+    numeros = {int(n) for n in re.findall(r"\b\d+\b", msg)}
+    for idx, task in enumerate(tarefas, start=1):
+        if idx in numeros:
+            selecionadas.append(task["task_id"])
+            continue
+        if any(token and token in msg for token in _task_match_tokens(task)):
+            selecionadas.append(task["task_id"])
+
+    return list(dict.fromkeys(selecionadas))
 
 
 def _tratar_confirmacao_reagendamento_backlog(user_id: str, mensagem: str, contexto: dict) -> str:
@@ -610,11 +634,27 @@ def _tratar_confirmacao_reagendamento_backlog(user_id: str, mensagem: str, conte
         set_session_state(user_id, "idle")
         return "Fechado, não movi nada."
 
-    if not _is_affirmative(mensagem):
-        return "Se estiver certo mover esse backlog, manda um sim. Se não, manda não."
-
     target_date = contexto.get("reschedule_date")
-    task_ids = contexto.get("reschedule_task_ids", [])
+    tarefas = contexto.get("reschedule_tasks", [])
+    if not tarefas:
+        tarefas_db = _buscar_tarefas_revisao(user_id, contexto.get("reschedule_task_ids", []))
+        tarefas = _serializar_tarefas_revisao(tarefas_db)
+        if tarefas:
+            set_session_state(
+                user_id,
+                "confirming_reschedule_backlog",
+                context={**contexto, "reschedule_tasks": tarefas},
+                replace_context=True,
+            )
+
+    task_ids = _selecionar_tarefas_reagendamento_backlog(mensagem, tarefas)
+
+    if not task_ids:
+        display = datetime.strptime(target_date, "%Y-%m-%d").strftime("%d/%m/%Y") if target_date else "essa data"
+        if re.search(r"\bsem\s+hor[aá]rio\b|\bsem\s+hora\b", _normalizar(mensagem)):
+            return f"Fechado, sem horário específico. Quais tarefas entram em {display}? Pode mandar os números, nomes ou \"todas\"."
+        return f"Me diz quais tarefas entram em {display}: números, nomes ou \"todas\"."
+
     resultado = reschedule_tasks_by_ids(task_ids, user_id, target_date)
     set_session_state(user_id, "idle")
     return resultado

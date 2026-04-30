@@ -399,6 +399,46 @@ async def test_revisao_check():
     _cleanup()
 
 
+def test_reagendar_backlog_deterministico():
+    print("\n[13] Backlog → seleção antes de reagendar")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    _create_task("Revisar arquitetura da Sara")
+    _create_task("Treinar")
+    _create_task("Estudar docker")
+
+    resposta = chat("Consegue passar as que estão no backlog para 2026-05-03?", user_id=TEST_USER)
+    resposta_sem_horario = chat("Sem horário específico", user_id=TEST_USER)
+    resposta_final = chat("1 e Estudar docker", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefas = db.query(Task).filter(Task.user_id == TEST_USER).order_by(Task.title.asc()).all()
+    db.close()
+    por_titulo = {t.title: t for t in tarefas}
+
+    check("pediu quais tarefas mover", "quais tarefas" in resposta.lower(), f"resposta: {resposta}")
+    check("não tratou sem horário como seleção", "quais tarefas" in resposta_sem_horario.lower(), f"resposta: {resposta_sem_horario}")
+    check("confirmou reagendamento", "reagendei" in resposta_final.lower(), f"resposta: {resposta_final}")
+    check(
+        "moveu só as tarefas selecionadas",
+        por_titulo["Revisar arquitetura da Sara"].due_date is not None
+        and por_titulo["Estudar docker"].due_date is not None
+        and por_titulo["Treinar"].due_date is None,
+        f"datas: {[t.due_date for t in tarefas]}",
+    )
+    check(
+        "usou a data pedida sem horário",
+        por_titulo["Revisar arquitetura da Sara"].due_date.strftime("%Y-%m-%d") == "2026-05-03"
+        and por_titulo["Estudar docker"].due_date.strftime("%Y-%m-%d") == "2026-05-03"
+        and por_titulo["Revisar arquitetura da Sara"].due_date.hour == 0
+        and por_titulo["Estudar docker"].due_date.minute == 0,
+        f"datas: {[t.due_date for t in tarefas]}",
+    )
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -419,6 +459,7 @@ async def main():
         test_estados()
         await test_fluxo_revisao_em_lote()
         await test_revisao_check()
+        test_reagendar_backlog_deterministico()
     finally:
         _cleanup()
 
