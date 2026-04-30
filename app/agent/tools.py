@@ -11,6 +11,8 @@ chamar cada função.
 """
 
 import logging
+import re
+import unicodedata
 from datetime import datetime, timedelta, date
 import uuid
 
@@ -59,6 +61,122 @@ def intervalo_dia_logico(agora: datetime | None = None) -> tuple[datetime, datet
     inicio = ref.replace(hour=0, minute=0, second=0, microsecond=0)
     fim = ref.replace(hour=23, minute=59, second=59, microsecond=0)
     return inicio, fim
+
+
+def _normalizar_titulo(title: str) -> str:
+    texto = unicodedata.normalize("NFKD", str(title).lower().strip())
+    texto = "".join(ch for ch in texto if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", texto)
+
+
+def _due_date_key(valor: datetime | None) -> str | None:
+    if not valor:
+        return None
+    dt = valor
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt).astimezone(TIMEZONE)
+    else:
+        dt = dt.astimezone(TIMEZONE)
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _buscar_tarefa_duplicada(db, user_id: str, title: str, due_date: datetime | None) -> Task | None:
+    titulo_norm = _normalizar_titulo(title)
+    due_key = _due_date_key(due_date)
+    tarefas = (
+        db.query(Task)
+        .filter(Task.user_id == user_id, Task.status == "pending")
+        .all()
+    )
+    for task in tarefas:
+        if _normalizar_titulo(task.title) == titulo_norm and _due_date_key(task.due_date) == due_key:
+            return task
+    return None
+
+
+def _intervalo_data_local(valor: date) -> tuple[datetime, datetime]:
+    inicio = TIMEZONE.localize(datetime.combine(valor, datetime.min.time()))
+    fim = TIMEZONE.localize(datetime.combine(valor, datetime.max.time().replace(microsecond=0)))
+    return inicio, fim
+
+
+def _periodo_para_intervalo(
+    period: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> tuple[str, datetime, datetime] | None:
+    hoje = hoje_logico()
+    period_norm = (period or "").strip().lower()
+
+    if start_date:
+        try:
+            inicio_date = datetime.strptime(start_date.strip(), "%Y-%m-%d").date()
+            fim_date = datetime.strptime((end_date or start_date).strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        inicio, _ = _intervalo_data_local(inicio_date)
+        _, fim = _intervalo_data_local(fim_date)
+        label = start_date if start_date == (end_date or start_date) else f"{start_date} a {end_date}"
+        return label, inicio, fim
+
+    if period_norm == "today":
+        inicio, fim = intervalo_dia_logico()
+        return "hoje", inicio, fim
+    if period_norm == "yesterday":
+        inicio, fim = _intervalo_data_local(hoje - timedelta(days=1))
+        return "ontem", inicio, fim
+    if period_norm == "this_week":
+        segunda = hoje - timedelta(days=hoje.weekday())
+        inicio, _ = _intervalo_data_local(segunda)
+        _, fim = _intervalo_data_local(segunda + timedelta(days=6))
+        return "esta semana", inicio, fim
+    if period_norm == "last_week":
+        segunda = hoje - timedelta(days=hoje.weekday() + 7)
+        inicio, _ = _intervalo_data_local(segunda)
+        _, fim = _intervalo_data_local(segunda + timedelta(days=6))
+        return "semana passada", inicio, fim
+
+    return None
+
+
+def tarefas_pendentes_no_periodo(
+    user_id: str,
+    period: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    include_backlog: bool = False,
+) -> tuple[str, list[Task]]:
+    intervalo = _periodo_para_intervalo(period, start_date, end_date)
+    if not intervalo:
+        return "", []
+
+    label, inicio, fim = intervalo
+    db = SessionLocal()
+    try:
+        query = db.query(Task).filter(
+            Task.user_id == user_id,
+            Task.status == "pending",
+            Task.due_date >= inicio,
+            Task.due_date <= fim,
+        )
+        tasks = query.order_by(Task.due_date.asc(), Task.created_at.asc()).all()
+
+        if include_backlog:
+            backlog = (
+                db.query(Task)
+                .filter(
+                    Task.user_id == user_id,
+                    Task.status == "pending",
+                    Task.due_date == None,
+                )
+                .order_by(Task.created_at.asc())
+                .all()
+            )
+            tasks.extend(backlog)
+
+        return label, tasks
+    finally:
+        db.close()
 
 
 def calcular_categoria(status: str, due_date: datetime | None, agora: datetime | None = None) -> str | None:
@@ -248,6 +366,21 @@ def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
         if not title or not str(title).strip():
             return "Erro: título da tarefa não pode ser vazio."
 
+    elif tool_name == "complete_tasks_in_period":
+        period = str(argumentos.get("period") or "").strip()
+        start_date = str(argumentos.get("start_date") or "").strip()
+        end_date = str(argumentos.get("end_date") or "").strip()
+        if not period and not start_date:
+            return "Erro: informe o período antes de concluir em massa. Use today, yesterday, this_week, last_week ou start_date."
+        if period and period not in ("today", "yesterday", "this_week", "last_week"):
+            return "Erro: período inválido. Use today, yesterday, this_week ou last_week."
+        for field_name, value in (("start_date", start_date), ("end_date", end_date)):
+            if value:
+                try:
+                    datetime.strptime(value, "%Y-%m-%d")
+                except ValueError:
+                    return f"Erro: {field_name} inválido. Use YYYY-MM-DD."
+
     elif tool_name == "reschedule_task":
         task_id = argumentos.get("task_id", "")
         if not task_id or not str(task_id).strip():
@@ -289,11 +422,7 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
                 except ValueError:
                     continue
 
-        existente = db.query(Task).filter(
-            Task.user_id == user_id,
-            Task.status == "pending",
-            Task.title.ilike(title.strip()),
-        ).first()
+        existente = _buscar_tarefa_duplicada(db, user_id, title.strip(), parsed_date)
         if existente:
             prazo = f" para {existente.due_date.strftime('%d/%m/%Y às %H:%M')}" if existente.due_date else " sem prazo definido"
             return f"Tarefa '{existente.title}' já existe{prazo}."
@@ -397,30 +526,42 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
         db.close()
 
 
-def complete_all_tasks(user_id: str, filter_date: str = None) -> str:
+def complete_tasks_in_period(
+    user_id: str,
+    period: str = None,
+    start_date: str = None,
+    end_date: str = None,
+    include_backlog: bool = False,
+) -> str:
+    intervalo = _periodo_para_intervalo(period, start_date, end_date)
+    if not intervalo:
+        return "Me diz o período antes de marcar em massa: hoje, ontem, esta semana ou uma data específica."
+
+    label, inicio, fim = intervalo
     db = SessionLocal()
     try:
         query = db.query(Task).filter(
             Task.user_id == user_id,
             Task.status == "pending",
+            Task.due_date >= inicio,
+            Task.due_date <= fim,
         )
 
-        if filter_date:
-            try:
-                date = datetime.strptime(filter_date.strip(), "%Y-%m-%d")
-                inicio = TIMEZONE.localize(date.replace(hour=0, minute=0))
-                fim = TIMEZONE.localize(date.replace(hour=23, minute=59))
-                query = query.filter(
-                    Task.due_date >= inicio,
-                    Task.due_date <= fim,
+        tasks = query.order_by(Task.due_date.asc(), Task.created_at.asc()).all()
+        if include_backlog:
+            tasks.extend(
+                db.query(Task)
+                .filter(
+                    Task.user_id == user_id,
+                    Task.status == "pending",
+                    Task.due_date == None,
                 )
-            except ValueError:
-                pass
-
-        tasks = query.all()
+                .order_by(Task.created_at.asc())
+                .all()
+            )
 
         if not tasks:
-            return "Nenhuma tarefa pendente encontrada para marcar como concluída."
+            return f"Não achei tarefa pendente em {label} para marcar como concluída."
 
         for task in tasks:
             task.status = "done"
@@ -429,11 +570,11 @@ def complete_all_tasks(user_id: str, filter_date: str = None) -> str:
 
         db.commit()
         titulos = ", ".join(f"'{t.title}'" for t in tasks)
-        return f"Tarefas {titulos} marcadas como concluídas! ✅"
+        return f"Marquei como concluídas as tarefas de {label}: {titulos}."
 
     except Exception as e:
         db.rollback()
-        logger.error(f"[complete_all_tasks] {e}")
+        logger.error(f"[complete_tasks_in_period] {e}")
         return f"Erro ao concluir tarefas: {str(e)}"
     finally:
         db.close()
@@ -669,11 +810,7 @@ def finalizar_planejamento(user_id: str, tarefas: list = None) -> str:
                     except ValueError:
                         continue
 
-            existente = db.query(Task).filter(
-                Task.user_id == user_id,
-                Task.status == "pending",
-                Task.title.ilike(title),
-            ).first()
+            existente = _buscar_tarefa_duplicada(db, user_id, title, parsed_date)
             if existente:
                 ignoradas.append(title)
                 continue
@@ -690,7 +827,7 @@ def finalizar_planejamento(user_id: str, tarefas: list = None) -> str:
             salvas.append(title)
 
         db.commit()
-        set_session_state(user_id, "idle")
+        set_session_state(user_id, "idle", context={"last_completed_flow": "planning"})
 
         if salvas:
             return f"Fechei seu plano. Salvei {len(salvas)} tarefa(s): {', '.join(salvas)}."
@@ -749,7 +886,7 @@ TOOLS_MAP: dict[str, callable] = {
     "list_tasks": list_tasks,
     "list_reminders": list_reminders,
     "complete_task": complete_task,
-    "complete_all_tasks": complete_all_tasks,
+    "complete_tasks_in_period": complete_tasks_in_period,
     "delete_task": delete_task,
     "delete_all_tasks": delete_all_tasks,
     "reschedule_task": reschedule_task,
@@ -838,18 +975,31 @@ TOOLS_SCHEMA: list[dict] = [
         },
     },
     {
-        "name": "complete_all_tasks",
+        "name": "complete_tasks_in_period",
         "description": (
-            "Marca TODAS as tarefas pendentes como concluídas de uma vez. "
-            "Use quando o usuário disser 'marcar todas', 'concluir tudo', 'fiz tudo hoje' ou similar. "
-            "Prefira esta tool a chamar complete_task múltiplas vezes."
+            "Marca em massa tarefas pendentes como concluídas, mas SOMENTE dentro de um período explícito. "
+            "Nunca use sem period ou start_date. Nunca conclua todas as tarefas abertas do sistema. "
+            "Use apenas quando o usuário especificar hoje, ontem, esta semana, semana passada ou uma data."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "filter_date": {
+                "period": {
                     "type": "string",
-                    "description": "Filtra apenas tarefas de uma data específica 'YYYY-MM-DD'. Opcional.",
+                    "enum": ["today", "yesterday", "this_week", "last_week"],
+                    "description": "Período explícito escolhido pelo usuário.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Data inicial em YYYY-MM-DD quando o usuário citar uma data específica.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Data final em YYYY-MM-DD. Se omitida, usa start_date como dia único.",
+                },
+                "include_backlog": {
+                    "type": "boolean",
+                    "description": "Inclui backlog sem data apenas se o usuário pedir explicitamente.",
                 },
             },
             "required": [],
@@ -860,7 +1010,7 @@ TOOLS_SCHEMA: list[dict] = [
         "description": (
             "Marca uma tarefa específica como concluída. "
             "Use quando o usuário mencionar uma tarefa específica que terminou. "
-            "Para marcar todas de uma vez, use complete_all_tasks."
+            "Para marcar várias de uma vez, só use complete_tasks_in_period se houver período explícito."
         ),
         "input_schema": {
             "type": "object",
@@ -973,5 +1123,10 @@ FINALIZAR_PLANEJAMENTO_SCHEMA = {
 
 # Tools disponíveis durante o planejamento: sem save_task (salvar é via finalizar_planejamento)
 PLANNING_TOOLS_SCHEMA = [
-    t for t in TOOLS_SCHEMA if t["name"] not in ("save_task", "delete_task", "delete_all_tasks")
+    t for t in TOOLS_SCHEMA if t["name"] not in (
+        "save_task",
+        "complete_tasks_in_period",
+        "delete_task",
+        "delete_all_tasks",
+    )
 ] + [FINALIZAR_PLANEJAMENTO_SCHEMA]

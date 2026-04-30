@@ -8,6 +8,7 @@ de mensagens longas.
 
 import logging
 import os
+import re
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import TelegramError
 from app.agent.copy import (
@@ -41,6 +42,14 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 _revisao_state: dict[str, dict] = {}
 
 
+def _limpar_markdown_simples(texto: str) -> str:
+    """Remove marcações comuns que aparecem cruas quando não usamos parse_mode."""
+    texto = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", texto)
+    texto = re.sub(r"__([^_\n]+)__", r"\1", texto)
+    texto = re.sub(r"`([^`\n]+)`", r"\1", texto)
+    return texto
+
+
 def teclado_home() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -65,7 +74,7 @@ async def enviar_mensagem(chat_id: str, texto: str, *, incluir_home: bool = True
     tentativas = 3
     for tentativa in range(1, tentativas + 1):
         try:
-            kwargs = {"chat_id": chat_id, "text": texto}
+            kwargs = {"chat_id": chat_id, "text": _limpar_markdown_simples(texto)}
             if incluir_home:
                 kwargs["reply_markup"] = teclado_home()
             await bot.send_message(**kwargs)

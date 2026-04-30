@@ -38,12 +38,14 @@ from app.agent.tools import (
     _validar_argumentos,
     TIMEZONE,
     complete_task_by_id,
+    complete_tasks_in_period,
     list_reminders,
     list_tasks,
     resumo_backlog,
     resumo_hoje,
     reschedule_task,
     save_task,
+    tarefas_pendentes_no_periodo,
 )
 from app.agent.prompts import get_system_prompt, get_planning_prompt
 from app.agent.session import get_session_state, get_session_context, set_session_state
@@ -101,13 +103,18 @@ LIST_TASK_KEYWORDS = [
     r"\bquais\s+são\s+minhas\s+tarefas\b",
 ]
 
-COMPLETE_ALL_KEYWORDS = [
+BULK_COMPLETE_KEYWORDS = [
     r"\bmarqu[ea]\s+todas\b",
     r"\bmarcar?\s+todas\b",
     r"\bconcluir\s+todas\b",
+    r"\bconclu[ai]\s+todas\b",
+    r"\bcomplete?\s+todas\b",
+    r"\bfinaliz[ae]\s+todas\b",
     r"\bfiz\s+tudo\b",
     r"\bterminez?\s+tudo\b",
+    r"\bterminei\s+tudo\b",
     r"\bmarcar?\s+tudo\s+como\s+conclu",
+    r"\bmarqu[ea]\s+tudo\s+como\s+(feito|conclu)",
     r"\btodas.*tarefas.*conclu",
     r"\btodas\s+como\s+conclu",
 ]
@@ -128,6 +135,12 @@ START_CHECK_KEYWORDS = [
     r"\bquero\s+revisar\s+minhas\s+atividades\b",
     r"\bmarcar\s+atividades\s+feitas\b",
     r"\brevisar\s+o\s+que\s+fiz\b",
+]
+
+ADD_TASK_PATTERNS = [
+    r"^(?P<title>.+?)\s+adicione\s+(?:a\s+)?tarefa\b.*$",
+    r"^(?:outra\s+tarefa\s+)?(?:para\s+)?adicionar\s+(?:é|eh|:)?\s*(?P<title>.+)$",
+    r"^(?:adicione|adicionar|crie|salve)\s+(?:a\s+)?tarefa\s+(?:de\s+)?(?P<title>.+)$",
 ]
 
 
@@ -262,12 +275,75 @@ def _confirmou_plano(historico: list, mensagem: str) -> bool:
     return confirmou_plano
 
 
-def _precisa_concluir_todas(mensagem: str) -> bool:
+def _precisa_concluir_periodo(mensagem: str) -> bool:
     msg_lower = mensagem.lower().strip()
-    for pattern in COMPLETE_ALL_KEYWORDS:
+    if msg_lower in {"tudo", "tudo certo", "ok", "sim"}:
+        return False
+    for pattern in BULK_COMPLETE_KEYWORDS:
         if re.search(pattern, msg_lower):
             return True
     return False
+
+
+def _detectar_periodo_conclusao(mensagem: str) -> dict | None:
+    msg_lower = mensagem.lower().strip()
+    if re.search(r"\bsemana\s+passada\b", msg_lower):
+        return {"period": "last_week"}
+    if re.search(r"\b(essa|esta)\s+semana\b|\bda\s+semana\b", msg_lower):
+        return {"period": "this_week"}
+    if re.search(r"\bhoje\b", msg_lower):
+        return {"period": "today"}
+    if re.search(r"\bontem\b", msg_lower):
+        return {"period": "yesterday"}
+
+    data = _parse_data_explicita(mensagem)
+    if data:
+        return {"start_date": data, "end_date": data}
+    return None
+
+
+def _preparar_confirmacao_conclusao_periodo(user_id: str, periodo: dict) -> str:
+    label, tarefas = tarefas_pendentes_no_periodo(user_id=user_id, **periodo)
+    if not label:
+        return "Não entendi o período. Pode me dizer se é hoje, ontem, esta semana ou uma data específica?"
+    if not tarefas:
+        set_session_state(user_id, "idle")
+        return f"Não achei tarefa pendente em {label}."
+
+    linhas = "\n".join(f"• {task.title}" for task in tarefas)
+    set_session_state(
+        user_id,
+        "confirming_bulk_complete",
+        context={"bulk_complete_period": periodo, "bulk_complete_label": label},
+        replace_context=True,
+    )
+    return f"Vou marcar como concluídas as tarefas de {label}:\n\n{linhas}\n\nConfirmo?"
+
+
+def _tratar_confirmacao_conclusao_periodo(user_id: str, mensagem: str, contexto: dict) -> str:
+    if _quer_sair_planejamento(mensagem) or re.search(r"\b(n[aã]o|cancela|deixa)\b", _normalizar(mensagem)):
+        set_session_state(user_id, "idle")
+        return "Beleza, não mexi nas tarefas."
+
+    periodo = contexto.get("bulk_complete_period")
+    if not periodo:
+        periodo = _detectar_periodo_conclusao(mensagem)
+        if not periodo:
+            return "De qual período? Hoje, ontem, esta semana ou uma data específica."
+        return _preparar_confirmacao_conclusao_periodo(user_id, periodo)
+
+    if _is_affirmative(mensagem):
+        resultado = complete_tasks_in_period(user_id=user_id, **periodo)
+        set_session_state(user_id, "idle")
+        salvar_historico(user_id, "user", mensagem)
+        salvar_historico(user_id, "assistant", resultado)
+        return resultado
+
+    novo_periodo = _detectar_periodo_conclusao(mensagem)
+    if novo_periodo:
+        return _preparar_confirmacao_conclusao_periodo(user_id, novo_periodo)
+
+    return f"Se estiver certo marcar as tarefas de {contexto.get('bulk_complete_label', 'desse período')}, manda um sim. Se não, me fala outro período."
 
 
 def _precisa_listar_tarefas(mensagem: str) -> bool:
@@ -276,6 +352,38 @@ def _precisa_listar_tarefas(mensagem: str) -> bool:
         if re.search(pattern, msg_lower):
             return True
     return False
+
+
+def _extrair_tarefa_para_salvar(mensagem: str) -> tuple[str, str | None] | None:
+    msg_lower = mensagem.lower()
+    if "lembrete" in msg_lower:
+        return None
+
+    for pattern in ADD_TASK_PATTERNS:
+        match = re.search(pattern, mensagem.strip(), flags=re.IGNORECASE)
+        if not match:
+            continue
+        title = match.group("title").strip(" .")
+        title = re.sub(r"\b(por favor|pra mim|para mim)\b", "", title, flags=re.IGNORECASE).strip(" .")
+        due_date = _parse_data_explicita(mensagem)
+        for trecho in ("amanhã", "amanha", "hoje", "ontem"):
+            title = re.sub(rf"\b{trecho}\b", "", title, flags=re.IGNORECASE).strip(" .")
+        title = re.sub(r"\s+", " ", title)
+        if len(title) >= 3:
+            return title, due_date
+    return None
+
+
+def _formatar_confirmacao_tarefa_salva(title: str, due_date: str | None, resultado: str) -> str:
+    if "erro" in resultado.lower() or "já existe" in resultado.lower():
+        return resultado
+    if not due_date:
+        return mensagem_tarefa_backlog_salva(title)
+    try:
+        display = datetime.strptime(due_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        display = due_date
+    return f"Anotei: {title} para {display}."
 
 
 def _calcular_data_filtro(mensagem: str) -> str | None:
@@ -962,6 +1070,7 @@ def _chat_planning(
 
             result_contents: list[dict] = []
             finalizado = False
+            resultado_finalizacao = ""
 
             for block in response.content:
                 if block.type == "tool_use":
@@ -973,8 +1082,16 @@ def _chat_planning(
                     })
                     if block.name == "finalizar_planejamento":
                         finalizado = True
+                        resultado_finalizacao = resultado
 
             messages.append({"role": "user", "content": result_contents})
+
+            if finalizado:
+                resposta = resultado_finalizacao or "Fechei o planejamento."
+                logger.info(f"[Planning] Sessão encerrada para {user_id}")
+                salvar_historico(user_id, "plan_user", mensagem)
+                salvar_historico(user_id, "plan_asst", resposta)
+                return resposta
 
             response2 = anthropic_client.messages.create(
                 model=ANTHROPIC_MODEL,
@@ -984,8 +1101,6 @@ def _chat_planning(
             )
             resposta = _extrair_texto(response2.content)
 
-            if finalizado:
-                logger.info(f"[Planning] Sessão encerrada para {user_id}")
         else:
             resposta = _extrair_texto(response.content)
 
@@ -1090,6 +1205,9 @@ def chat(mensagem: str, user_id: str) -> str:
             return mensagem_cancelamento()
         return _tratar_confirmacao_revisao(user_id, mensagem, session_context)
 
+    if state == "confirming_bulk_complete":
+        return _tratar_confirmacao_conclusao_periodo(user_id, mensagem, session_context)
+
     # Modo planejamento: usa histórico isolado para não contaminar contexto normal
     if state == "planning":
         if _quer_sair_planejamento(mensagem):
@@ -1129,17 +1247,38 @@ def chat(mensagem: str, user_id: str) -> str:
 
     system_prompt = get_system_prompt(user_id)
 
-    # Forced routing: "marcar todas como concluídas"
-    if _precisa_concluir_todas(mensagem):
-        filter_date = _calcular_data_filtro(mensagem)
-        logger.info(f"[Forced routing] Concluindo todas as tarefas (filter_date={filter_date})")
-        tool_result = executar_tool(
-            "complete_all_tasks", {"filter_date": filter_date} if filter_date else {},
-            user_id=user_id,
-        )
+    if session_context.get("last_completed_flow") == "planning" and _is_affirmative(mensagem):
+        set_session_state(user_id, "idle")
+        resposta = "Fechado."
         salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", tool_result)
-        return tool_result
+        salvar_historico(user_id, "assistant", resposta)
+        return resposta
+
+    # Forced routing: conclusão em massa só com período explícito + confirmação.
+    if _precisa_concluir_periodo(mensagem):
+        periodo = _detectar_periodo_conclusao(mensagem)
+        if not periodo:
+            set_session_state(
+                user_id,
+                "confirming_bulk_complete",
+                context={"bulk_complete_period": None},
+                replace_context=True,
+            )
+            resposta = "De qual período? Hoje, ontem, esta semana ou uma data específica."
+        else:
+            resposta = _preparar_confirmacao_conclusao_periodo(user_id, periodo)
+        salvar_historico(user_id, "user", mensagem)
+        salvar_historico(user_id, "assistant", resposta)
+        return resposta
+
+    pedido_tarefa = _extrair_tarefa_para_salvar(mensagem)
+    if pedido_tarefa:
+        title, due_date = pedido_tarefa
+        resultado = save_task(title, user_id=user_id, due_date=due_date)
+        resposta = _formatar_confirmacao_tarefa_salva(title, due_date, resultado)
+        salvar_historico(user_id, "user", mensagem)
+        salvar_historico(user_id, "assistant", resposta)
+        return resposta
 
     # Forced routing: listar tarefas direto do banco
     if _precisa_listar_tarefas(mensagem):
@@ -1218,7 +1357,7 @@ def chat(mensagem: str, user_id: str) -> str:
             messages.append({"role": "user", "content": result_contents})
 
             # Para operações de escrita, reforça no system prompt da segunda chamada
-            WRITE_TOOLS = {"save_task", "create_reminder", "complete_task", "reschedule_task"}
+            WRITE_TOOLS = {"save_task", "create_reminder", "complete_task", "complete_tasks_in_period", "reschedule_task"}
             system2 = system_prompt
             if tools_usadas & WRITE_TOOLS:
                 system2 += (
