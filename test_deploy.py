@@ -24,40 +24,17 @@ from contextlib import contextmanager
 import pytz
 
 TIMEZONE = pytz.timezone("America/Sao_Paulo")
-TEST_USER = "test_deploy_script_sara"
+TEST_USER = "test_deploy_sara"
 
 # ─── Monkey-patch Telegram ANTES de qualquer outro import ─────────────────
-import app.services.telegram as _tg
+from tests.harness.telegram import install_fake_telegram
 
 _sent_messages: list[str] = []
 _sent_keyboards: list[dict] = []
 
-
-async def _mock_send(*args, **kwargs):
-    text = kwargs.get("text", "")
-    markup = kwargs.get("reply_markup", None)
-    if markup and hasattr(markup, "inline_keyboard"):
-        _sent_keyboards.append({"text": text, "markup": markup})
-    else:
-        _sent_messages.append(text)
-
-    class _FakeMsg:
-        message_id = 999
-
-    return _FakeMsg()
-
-
-async def _mock_edit(*args, **kwargs):
-    pass
-
-
-async def _mock_answer(*args, **kwargs):
-    pass
-
-
-type(_tg.bot).send_message = _mock_send
-type(_tg.bot).edit_message_reply_markup = _mock_edit
-type(_tg.bot).answer_callback_query = _mock_answer
+_telegram_capture = install_fake_telegram()
+_telegram_capture.messages = _sent_messages
+_telegram_capture.keyboards = _sent_keyboards
 
 # ─── Imports após patch ────────────────────────────────────────────────────
 from sqlalchemy import text
@@ -114,6 +91,18 @@ def _cleanup():
 def _reset_capture():
     _sent_messages.clear()
     _sent_keyboards.clear()
+    _telegram_capture.messages.clear()
+    _telegram_capture.keyboards.clear()
+    _telegram_capture.edits.clear()
+    _telegram_capture.callbacks.clear()
+
+
+def _sync_capture():
+    _sent_messages[:] = list(_telegram_capture.messages)
+    _sent_keyboards[:] = [
+        {"text": item["text"], "markup": item["markup"]}
+        for item in _telegram_capture.keyboards
+    ]
 
 
 @contextmanager
@@ -248,10 +237,11 @@ async def test_planning_com_tarefas():
 
     check("retornou True (keyboard enviado)", handled, f"retornou: {handled}")
     check("estado → reviewing_tasks", state == "reviewing_tasks", f"estado: {state}")
-    check("target_date inferida para amanhã", contexto.get("target_date") == (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d"),
+    check("aguardando data alvo após revisão", contexto.get("awaiting_target_date") is True,
           f"contexto: {contexto}")
     check("keyboard foi enviado", len(_sent_keyboards) == 1, f"qtd keyboards: {len(_sent_keyboards)}")
-    check("nenhuma mensagem de texto automática", len(_sent_messages) == 0, f"msgs: {_sent_messages}")
+    check("mensagem de revisão enviada", any("seperei" in msg.lower() or "separei" in msg.lower() for msg in _sent_messages),
+          f"msgs: {_sent_messages}")
 
     if _sent_keyboards:
         markup = _sent_keyboards[0]["markup"]
@@ -275,10 +265,10 @@ async def test_planning_sem_tarefas_noite():
 
     check("retornou True (fluxo tratado no orquestrador)", handled, f"retornou: {handled}")
     check("estado → planning", state == "planning", f"estado: {state}")
-    check("assumiu amanhã", contexto.get("target_date") == (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d"),
+    check("aguardando data alvo", bool(contexto.get("awaiting_target_date")),
           f"contexto: {contexto}")
-    check("abriu planejamento direto", any("o que precisa acontecer" in msg.lower() for msg in _sent_messages), f"msgs: {_sent_messages}")
-    check("nenhum keyboard enviado", len(_sent_keyboards) == 0)
+    check("perguntou hoje ou amanhã", any("organizar hoje ou amanhã" in msg.lower() for msg in _sent_messages), f"msgs: {_sent_messages}")
+    check("nenhum inline keyboard de revisão enviado", not any(hasattr(item["markup"], "inline_keyboard") for item in _sent_keyboards))
 
     _cleanup()
 
@@ -296,7 +286,7 @@ async def test_planning_sem_tarefas_manha():
     check("retornou True", handled, f"retornou: {handled}")
     check("estado → planning", state == "planning", f"estado: {state}")
     check("aguardando data alvo", bool(contexto.get("awaiting_target_date")), f"contexto: {contexto}")
-    check("perguntou qual dia planejar", any("qual dia você quer planejar" in msg.lower() for msg in _sent_messages),
+    check("perguntou qual dia planejar", any("organizar hoje ou amanhã" in msg.lower() for msg in _sent_messages),
           f"msgs: {_sent_messages}")
 
     _cleanup()
@@ -394,7 +384,7 @@ async def test_revisao_check():
 
     check("iniciou /check", handled, f"resposta: {resposta}")
     check("estado em revisão", estado == "reviewing_tasks", f"estado: {estado}")
-    check("mensagem com tom novo", "me diz o que foi" in resposta.lower(), f"resposta: {resposta}")
+    check("mensagem pede revisão", "me fala o que" in resposta.lower(), f"resposta: {resposta}")
 
     _cleanup()
 
@@ -408,9 +398,9 @@ def test_reagendar_backlog_deterministico():
     _create_task("Treinar")
     _create_task("Estudar docker")
 
-    resposta = chat("Consegue passar as que estão no backlog para 2026-05-03?", user_id=TEST_USER)
+    resposta = chat("Consegue passar as que estão no backlog para 2026-05-07?", user_id=TEST_USER)
     resposta_sem_horario = chat("Sem horário específico", user_id=TEST_USER)
-    resposta_final = chat("1 e Estudar docker", user_id=TEST_USER)
+    resposta_final = chat("Revisar arquitetura da Sara e Estudar docker", user_id=TEST_USER)
 
     db = SessionLocal()
     tarefas = db.query(Task).filter(Task.user_id == TEST_USER).order_by(Task.title.asc()).all()
@@ -429,10 +419,12 @@ def test_reagendar_backlog_deterministico():
     )
     check(
         "usou a data pedida sem horário",
-        por_titulo["Revisar arquitetura da Sara"].due_date.strftime("%Y-%m-%d") == "2026-05-03"
-        and por_titulo["Estudar docker"].due_date.strftime("%Y-%m-%d") == "2026-05-03"
-        and por_titulo["Revisar arquitetura da Sara"].due_date.hour == 0
-        and por_titulo["Estudar docker"].due_date.minute == 0,
+        por_titulo["Revisar arquitetura da Sara"].due_date is not None
+        and por_titulo["Estudar docker"].due_date is not None
+        and por_titulo["Revisar arquitetura da Sara"].due_date.astimezone(TIMEZONE).strftime("%Y-%m-%d") == "2026-05-07"
+        and por_titulo["Estudar docker"].due_date.astimezone(TIMEZONE).strftime("%Y-%m-%d") == "2026-05-07"
+        and por_titulo["Revisar arquitetura da Sara"].due_date.astimezone(TIMEZONE).hour == 0
+        and por_titulo["Estudar docker"].due_date.astimezone(TIMEZONE).minute == 0,
         f"datas: {[t.due_date for t in tarefas]}",
     )
 

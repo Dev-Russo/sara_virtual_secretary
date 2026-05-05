@@ -1,48 +1,10 @@
 import asyncio
 
-# Monkey-patch Telegram bot BEFORE importing anything that calls it.
-# Intercepts send_message / edit / answer so CLI never hits the real API.
-import app.services.telegram as _tg
+# Install fake Telegram transport BEFORE importing anything that sends messages.
+from tests.harness.telegram import install_fake_telegram
 
-
-async def _mock_send(*args, **kwargs):
-    text = kwargs.get("text", args[1] if len(args) > 1 else "")
-    reply_markup = kwargs.get("reply_markup", None)
-    if reply_markup and hasattr(reply_markup, "inline_keyboard"):
-        print(f"\n[Sara]: {text}")
-        for row in reply_markup.inline_keyboard:
-            print("  " + "  ".join(f"[{btn.text}]" for btn in row))
-    elif reply_markup and hasattr(reply_markup, "keyboard"):
-        print(f"\n[Sara]: {text}")
-        for row in reply_markup.keyboard:
-            print("  " + "  ".join(f"[{btn.text}]" for btn in row))
-    else:
-        print(f"\n[Sara]: {text}")
-    print()
-
-    class _FakeMsg:
-        message_id = 0
-
-    return _FakeMsg()
-
-
-async def _mock_edit(*args, **kwargs):
-    reply_markup = kwargs.get("reply_markup", None)
-    if reply_markup and hasattr(reply_markup, "inline_keyboard"):
-        print("[Teclado atualizado]:")
-        for row in reply_markup.inline_keyboard:
-            print("  " + "  ".join(f"[{btn.text}]" for btn in row))
-        print()
-
-
-async def _mock_answer(*args, **kwargs):
-    pass
-
-
-type(_tg.bot).send_message = _mock_send
-type(_tg.bot).edit_message_reply_markup = _mock_edit
-type(_tg.bot).edit_message_text = _mock_edit
-type(_tg.bot).answer_callback_query = _mock_answer
+# Equivalent smoke criterion: install_fake_telegram()
+install_fake_telegram(echo=True)
 
 from app.agent.sara_agent import chat
 from app.agent.session import get_session_state, set_session_state

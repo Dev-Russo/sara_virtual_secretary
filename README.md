@@ -178,6 +178,30 @@ export ENV_FILE=.env.local
 alembic upgrade head
 ```
 
+### Development Harness
+
+Use the harness for local development and regression checks without changing the production Telegram webhook.
+
+```bash
+export ENV_FILE=.env.local
+docker-compose up -d
+alembic upgrade head
+
+# Load deterministic realistic seed data
+python3 tests/run_harness_smoke.py seed-core
+
+# Optional volume data for performance/query checks
+python3 tests/run_harness_smoke.py seed-volume --count 500
+
+# Verify the Phase 1 harness path
+python3 tests/run_harness_smoke.py phase-1-smoke
+
+# Manual CLI exploration using the same fake Telegram transport
+python3 cli.py
+```
+
+Do not register or change the production Telegram webhook for local harness testing.
+
 ### 3. Development (Webhook + ngrok)
 
 ```bash

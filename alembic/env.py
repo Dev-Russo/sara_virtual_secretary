@@ -2,10 +2,8 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 from alembic import context
-from dotenv import load_dotenv
-import os
 
-load_dotenv()
+from app.config import DATABASE_URL
 
 from app.db.database import Base
 from app.models.task import Task
@@ -17,7 +15,7 @@ from app.models.tool_call_log import ToolCallLog
 # access to the values within the .ini file in use.
 config = context.config
 
-config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL"))
+config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -64,7 +62,7 @@ def run_migrations_online() -> None:
     """Run migrations in 'online' mode usando DATABASE_URL do .env"""
     from sqlalchemy import create_engine
 
-    connectable = create_engine(os.getenv("DATABASE_URL"), poolclass=pool.NullPool)
+    connectable = create_engine(DATABASE_URL, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
         context.configure(

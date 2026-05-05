@@ -37,6 +37,10 @@ CORRECOES_E_MELHORIAS.md
 PROJETO_SARA.md
 
 # Codex
-.codex
+.codex/
 
+# GSD generated workspace/state
+.planning/
+.gsd/
+.agents/
 
