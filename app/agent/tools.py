@@ -330,7 +330,7 @@ def obter_grupos_tarefas(user_id: str, *, sync: bool = True, agora: datetime | N
         )
         grupos = {categoria: [] for categoria in TASK_CATEGORIES}
         for task in tarefas:
-            categoria = task.category or calcular_categoria(task.status, task.due_date, agora)
+            categoria = calcular_categoria(task.status, task.due_date, agora)
             if categoria:
                 grupos.setdefault(categoria, []).append(task)
         return grupos
@@ -641,7 +641,7 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
 
         grupos = {categoria: [] for categoria in TASK_CATEGORIES}
         for task in tasks:
-            categoria = task.category or calcular_categoria(task.status, task.due_date)
+            categoria = calcular_categoria(task.status, task.due_date)
             if categoria:
                 grupos[categoria].append(task)
 

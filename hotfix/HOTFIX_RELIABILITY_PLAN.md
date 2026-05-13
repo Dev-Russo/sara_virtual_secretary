@@ -27,7 +27,7 @@ Este plano esta quebrado em small patches para aplicacao incremental, validacao 
 - [x] Patch 05 - Corrigir confirmacao falsa no fluxo de revisao
 - [x] Patch 06 - Fortalecer resolucao de entidade para mutacoes
 - [x] Patch 07 - Cobrir regressao critica com testes
-- [ ] Patch 08 - Revisar consistencia backlog/categorias
+- [x] Patch 08 - Revisar consistencia backlog/categorias
 - [ ] Patch 09 - Auditar logs e observabilidade de incidentes
 - [x] Patch 10 - Permitir conclusão em massa do backlog sem exigir data
 - [x] Patch 11 - Permitir seleção parcial determinística ao concluir backlog

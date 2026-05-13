@@ -53,7 +53,7 @@ from app.agent.sara_agent import (
     toggle_review_task,
     finalizar_revisao,
 )
-from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA
+from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA, list_tasks
 import app.scheduler.jobs as jobs
 from app.agent import sara_agent as sara_agent_module
 from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao, iniciar_revisao_check
@@ -790,6 +790,33 @@ def test_delete_ambiguo_pede_selecao():
     _cleanup()
 
 
+def test_listagem_ignora_categoria_persistida_stale():
+    print("\n[26] Listagem ignora categoria persistida stale")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    db = SessionLocal()
+    try:
+        task = Task(
+            user_id=TEST_USER,
+            title="Tarefa com categoria stale",
+            due_date=hoje,
+            status="pending",
+            category="backlog",
+        )
+        db.add(task)
+        db.commit()
+    finally:
+        db.close()
+
+    resposta = list_tasks(TEST_USER)
+
+    check("classificou pela data real, não pela categoria stale", "Hoje:" in resposta and "Tarefa com categoria stale" in resposta and "Backlog:" not in resposta.split("Tarefa com categoria stale")[0], f"resposta: {resposta}")
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -823,6 +850,7 @@ async def main():
         test_revisao_confirma_so_o_que_persistiu()
         test_complete_task_ambiguo_nao_muta()
         test_delete_ambiguo_pede_selecao()
+        test_listagem_ignora_categoria_persistida_stale()
     finally:
         _cleanup()
 
