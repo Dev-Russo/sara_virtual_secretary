@@ -809,6 +809,52 @@ def delete_all_tasks(user_id: str, filter_date: str = None) -> str:
         db.close()
 
 
+def delete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
+    if not task_ids:
+        return "Nenhuma tarefa pendente encontrada para deletar."
+
+    db = SessionLocal()
+    try:
+        uuids: list[uuid.UUID] = []
+        for task_id in task_ids:
+            try:
+                uuids.append(uuid.UUID(str(task_id)))
+            except ValueError:
+                continue
+
+        if not uuids:
+            return "Nenhuma tarefa pendente encontrada para deletar."
+
+        tasks = (
+            db.query(Task)
+            .filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.id.in_(uuids),
+            )
+            .all()
+        )
+
+        if not tasks:
+            return "Nenhuma tarefa pendente encontrada para deletar."
+
+        ordem = {str(task_id): idx for idx, task_id in enumerate(task_ids)}
+        tasks.sort(key=lambda task: ordem.get(str(task.id), 9999))
+
+        titulos = [task.title for task in tasks]
+        for task in tasks:
+            db.delete(task)
+        db.commit()
+
+        return f"{len(titulos)} tarefa(s) deletada(s): {', '.join(titulos)}"
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[delete_tasks_by_ids] {e}")
+        return f"Erro ao deletar tarefas: {str(e)}"
+    finally:
+        db.close()
+
+
 def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
     db = SessionLocal()
     try:

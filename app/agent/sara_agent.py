@@ -39,6 +39,7 @@ from app.agent.tools import (
     TIMEZONE,
     complete_task_by_id,
     complete_tasks_in_period,
+    delete_tasks_by_ids,
     list_reminders,
     list_tasks,
     resumo_backlog,
@@ -155,6 +156,17 @@ RESCHEDULE_BACKLOG_PATTERNS = [
     r"\b(resgata|resgate|resgatar|move|mova|mover|joga|jogue|jogar|passa|passe|passar|reagenda|reagende|reagendar)\b.*\b(hoje|amanh[aã]|\d{1,2}/\d{1,2}(?:/\d{4})?|\d{4}-\d{2}-\d{2})\b",
     r"\b(hoje|amanh[aã]|\d{1,2}/\d{1,2}(?:/\d{4})?|\d{4}-\d{2}-\d{2})\b.*\b(resgata|resgate|resgatar|move|mova|mover|joga|jogue|jogar|passa|passe|passar|reagenda|reagende|reagendar)\b",
 ]
+
+DELETE_KEYWORDS = (
+    "apaga",
+    "apague",
+    "deleta",
+    "delete",
+    "remove",
+    "remova",
+    "exclui",
+    "exclua",
+)
 
 
 # Negação ampla — pega "não quero/vou/posso planejar/planjar/planear/planeja/programar"
@@ -365,6 +377,149 @@ def _precisa_listar_tarefas(mensagem: str) -> bool:
         if re.search(pattern, msg_lower):
             return True
     return False
+
+
+def _eh_pedido_delete(mensagem: str) -> bool:
+    msg = _normalizar(mensagem)
+    return any(re.search(rf"\b{kw}\b", msg) for kw in DELETE_KEYWORDS)
+
+
+def _eh_pedido_delete_em_massa(mensagem: str) -> bool:
+    msg = _normalizar(mensagem)
+    return _eh_pedido_delete(mensagem) and bool(re.search(r"\b(todas|todos|tudo)\b", msg))
+
+
+def _extrair_titulo_delete(mensagem: str) -> str | None:
+    padroes = [
+        r"^(?:apaga|apague|deleta|delete|remove|remova|exclui|exclua)\s+(?:a\s+)?tarefa\s+(?P<title>.+)$",
+        r"^(?:apaga|apague|deleta|delete|remove|remova|exclui|exclua)\s+(?P<title>.+)$",
+    ]
+    for pattern in padroes:
+        match = re.search(pattern, mensagem.strip(), flags=re.IGNORECASE)
+        if not match:
+            continue
+        title = match.group("title").strip(" .")
+        if re.search(r"\b(todas|todos|tudo)\b", _normalizar(title)):
+            return None
+        title = re.sub(r"\b(por favor|pra mim|para mim|por gentileza)\b", "", title, flags=re.IGNORECASE).strip(" .")
+        return title or None
+    return None
+
+
+def _buscar_tarefas_para_delete(user_id: str, title: str) -> list[Task]:
+    title = title.strip()
+    if not title:
+        return []
+
+    db = SessionLocal()
+    try:
+        tarefas = (
+            db.query(Task)
+            .filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.title.ilike(f"%{title}%"),
+            )
+            .order_by(Task.created_at.asc())
+            .all()
+        )
+        if tarefas:
+            return tarefas
+
+        tokens = [tok for tok in title.split() if len(tok) > 3]
+        if not tokens:
+            return []
+
+        candidatos: dict[str, Task] = {}
+        for token in tokens:
+            encontrados = (
+                db.query(Task)
+                .filter(
+                    Task.user_id == user_id,
+                    Task.status == "pending",
+                    Task.title.ilike(f"%{token}%"),
+                )
+                .order_by(Task.created_at.asc())
+                .all()
+            )
+            for task in encontrados:
+                candidatos[str(task.id)] = task
+        return list(candidatos.values())
+    finally:
+        db.close()
+
+
+def _buscar_tarefas_para_delete_em_massa(user_id: str, filter_date: str | None = None) -> list[Task]:
+    db = SessionLocal()
+    try:
+        query = db.query(Task).filter(
+            Task.user_id == user_id,
+            Task.status == "pending",
+        )
+        if filter_date:
+            try:
+                ref = datetime.strptime(filter_date.strip(), "%Y-%m-%d")
+                inicio = TIMEZONE.localize(ref.replace(hour=0, minute=0, second=0, microsecond=0))
+                fim = TIMEZONE.localize(ref.replace(hour=23, minute=59, second=59, microsecond=0))
+                query = query.filter(Task.due_date >= inicio, Task.due_date <= fim)
+            except ValueError:
+                return []
+        return query.order_by(Task.due_date.asc().nullslast(), Task.created_at.asc()).all()
+    finally:
+        db.close()
+
+
+def _preparar_confirmacao_delete(user_id: str, tarefas: list[Task], *, label: str) -> str:
+    if not tarefas:
+        set_session_state(user_id, "idle")
+        return f"Não achei tarefa pendente para deletar em {label}." if label != "essa seleção" else "Não achei tarefa pendente para deletar."
+
+    titulos = [task.title for task in tarefas]
+    context = {
+        "delete_task_ids": [str(task.id) for task in tarefas],
+        "delete_task_titles": titulos,
+        "delete_label": label,
+    }
+    set_session_state(user_id, "confirming_delete", context=context, replace_context=True)
+    linhas = "\n".join(f"• {titulo}" for titulo in titulos)
+    return f"Vou deletar estas tarefas de {label}:\n\n{linhas}\n\nConfirmo?"
+
+
+def _preparar_delete_deterministico(user_id: str, mensagem: str) -> str | None:
+    if not _eh_pedido_delete(mensagem):
+        return None
+
+    if _eh_pedido_delete_em_massa(mensagem):
+        filter_date = _calcular_data_filtro(mensagem) or _parse_data_explicita(mensagem)
+        tarefas = _buscar_tarefas_para_delete_em_massa(user_id, filter_date)
+        label = filter_date or "todas as pendentes"
+        return _preparar_confirmacao_delete(user_id, tarefas, label=label)
+
+    titulo = _extrair_titulo_delete(mensagem)
+    if not titulo:
+        return "Me diz qual tarefa você quer deletar."
+
+    tarefas = _buscar_tarefas_para_delete(user_id, titulo)
+    return _preparar_confirmacao_delete(user_id, tarefas, label="essa seleção")
+
+
+def _tratar_confirmacao_delete(user_id: str, mensagem: str, contexto: dict) -> str:
+    if _quer_sair_planejamento(mensagem) or re.search(r"\b(n[aã]o|cancela|deixa)\b", _normalizar(mensagem)):
+        set_session_state(user_id, "idle")
+        return "Beleza, não deletei nada."
+
+    if not _is_affirmative(mensagem):
+        titulos = contexto.get("delete_task_titles", [])
+        if not titulos:
+            set_session_state(user_id, "idle")
+            return "Não achei a seleção pendente para deletar."
+        return "Se estiver certo, manda um sim. Se não, manda não."
+
+    resultado = delete_tasks_by_ids(contexto.get("delete_task_ids", []), user_id)
+    set_session_state(user_id, "idle")
+    salvar_historico(user_id, "user", mensagem)
+    salvar_historico(user_id, "assistant", resultado)
+    return resultado
 
 
 def _limpar_titulo_extraido(title: str, mensagem: str) -> str:
@@ -1382,6 +1537,9 @@ def chat(mensagem: str, user_id: str) -> str:
     if state == "confirming_bulk_complete":
         return _tratar_confirmacao_conclusao_periodo(user_id, mensagem, session_context)
 
+    if state == "confirming_delete":
+        return _tratar_confirmacao_delete(user_id, mensagem, session_context)
+
     if state == "confirming_backlog_review":
         return _tratar_confirmacao_revisao_backlog(user_id, mensagem, session_context)
 
@@ -1450,6 +1608,12 @@ def chat(mensagem: str, user_id: str) -> str:
         salvar_historico(user_id, "user", mensagem)
         salvar_historico(user_id, "assistant", resposta)
         return resposta
+
+    resposta_delete = _preparar_delete_deterministico(user_id, mensagem)
+    if resposta_delete:
+        salvar_historico(user_id, "user", mensagem)
+        salvar_historico(user_id, "assistant", resposta_delete)
+        return resposta_delete
 
     if _quer_reagendar_backlog(mensagem):
         resposta = _preparar_reagendamento_backlog(user_id, mensagem)

@@ -16,6 +16,7 @@ VALID_STATES = (
     "confirming_bulk_complete",
     "confirming_backlog_review",
     "confirming_reschedule_backlog",
+    "confirming_delete",
 )
 
 # Estados de planejamento expiram após inatividade — evita usuário preso
@@ -38,6 +39,7 @@ def get_session_state(user_id: str) -> str:
             "confirming_bulk_complete",
             "confirming_backlog_review",
             "confirming_reschedule_backlog",
+            "confirming_delete",
         ) and session.updated_at:
             updated = session.updated_at
             if updated.tzinfo is None:

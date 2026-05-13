@@ -459,6 +459,85 @@ def test_prompt_bloqueia_delecao_no_fluxo_livre():
     )
 
 
+def test_delete_deterministico_por_titulo():
+    print("\n[16] Delete determinístico por título com confirmação")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    _create_task("Alongamento", due_date=hoje)
+    _create_task("Treino", due_date=hoje)
+
+    resposta = chat("apaga a tarefa Alongamento", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+    resposta_cancelada = chat("não", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefas_restantes = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").order_by(Task.title.asc()).all()
+    db.close()
+
+    check("entrou em estado de confirmação", estado == "confirming_delete", f"estado: {estado}")
+    check("mostrou preview da tarefa", "Alongamento" in resposta and "Confirmo?" in resposta, f"resposta: {resposta}")
+    check("cancelamento não deleta", "não deletei nada" in resposta_cancelada.lower(), f"resposta: {resposta_cancelada}")
+    check(
+        "tarefas seguem intactas após cancelamento",
+        sorted(task.title for task in tarefas_restantes) == ["Alongamento", "Treino"],
+        f"tarefas: {[task.title for task in tarefas_restantes]}",
+    )
+
+    resposta = chat("apaga a tarefa Alongamento", user_id=TEST_USER)
+    resposta_confirmada = chat("sim", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefas_restantes = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").order_by(Task.title.asc()).all()
+    db.close()
+
+    check("preview reaparece na nova tentativa", "Alongamento" in resposta and "Confirmo?" in resposta, f"resposta: {resposta}")
+    check("confirmação executa delete", "1 tarefa(s) deletada(s): Alongamento" in resposta_confirmada, f"resposta: {resposta_confirmada}")
+    check(
+        "removeu só a tarefa confirmada",
+        [task.title for task in tarefas_restantes] == ["Treino"],
+        f"tarefas: {[task.title for task in tarefas_restantes]}",
+    )
+
+    _cleanup()
+
+
+def test_delete_deterministico_em_massa_por_data():
+    print("\n[17] Delete determinístico em massa por data")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    amanha = (hoje + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+    _create_task("Reunião hoje", due_date=hoje)
+    _create_task("Estudo hoje", due_date=hoje)
+    _create_task("Treino amanhã", due_date=amanha)
+
+    resposta = chat("apaga todas as tarefas de hoje", user_id=TEST_USER)
+    resposta_confirmada = chat("sim", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefas_restantes = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").order_by(Task.title.asc()).all()
+    db.close()
+
+    check("preview mostra tarefas de hoje", "Reunião hoje" in resposta and "Estudo hoje" in resposta, f"resposta: {resposta}")
+    check("preview pede confirmação", "Confirmo?" in resposta, f"resposta: {resposta}")
+    check(
+        "deletou só o conjunto congelado",
+        "2 tarefa(s) deletada(s): Reunião hoje, Estudo hoje" in resposta_confirmada
+        or "2 tarefa(s) deletada(s): Estudo hoje, Reunião hoje" in resposta_confirmada,
+        f"resposta: {resposta_confirmada}",
+    )
+    check(
+        "manteve tarefas fora do filtro",
+        [task.title for task in tarefas_restantes] == ["Treino amanhã"],
+        f"tarefas: {[task.title for task in tarefas_restantes]}",
+    )
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -482,6 +561,8 @@ async def main():
         test_reagendar_backlog_deterministico()
         test_tools_destrutivas_fora_do_schema_geral()
         test_prompt_bloqueia_delecao_no_fluxo_livre()
+        test_delete_deterministico_por_titulo()
+        test_delete_deterministico_em_massa_por_data()
     finally:
         _cleanup()
 
