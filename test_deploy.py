@@ -41,6 +41,7 @@ _telegram_capture.keyboards = _sent_keyboards
 from sqlalchemy import text
 
 from app.db.database import SessionLocal
+from app.models.conversation import ConversationHistory
 from app.models.task import Task
 from app.models.user_session import UserSession
 from app.agent.session import get_session_state, set_session_state, get_session_context
@@ -49,9 +50,11 @@ from app.agent.sara_agent import (
     _quer_iniciar_planejamento,
     _quer_sair_planejamento,
     _confirmou_plano,
+    carregar_historico,
     chat,
     toggle_review_task,
     finalizar_revisao,
+    salvar_historico,
 )
 from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA, list_tasks
 import app.scheduler.jobs as jobs
@@ -86,6 +89,7 @@ def _create_task(title: str, due_date=None, status: str = "pending") -> str:
 def _cleanup():
     db = SessionLocal()
     try:
+        db.query(ConversationHistory).filter(ConversationHistory.user_id == TEST_USER).delete()
         db.query(Task).filter(Task.user_id == TEST_USER).delete()
         db.query(UserSession).filter(UserSession.user_id == TEST_USER).delete()
         db.commit()
@@ -817,6 +821,57 @@ def test_listagem_ignora_categoria_persistida_stale():
     _cleanup()
 
 
+def test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje():
+    print("\n[27] Conclusão em massa reconhece frase com minhas atividades de hoje")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    _create_task("Alongamento", due_date=hoje)
+
+    resposta = chat("Marque minhas atividades de hoje como concluídas por favor", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+
+    check("entrou no fluxo determinístico em vez do LLM livre", "Vou marcar como concluídas as tarefas de hoje" in resposta, f"resposta: {resposta}")
+    check("entrou no estado de confirmação em massa", estado == "confirming_bulk_complete", f"estado: {estado}")
+
+    _cleanup()
+
+
+def test_historico_ignora_registros_sem_created_at():
+    print("\n[28] Histórico ignora registros sem created_at")
+    _reset_capture()
+    _cleanup()
+
+    db = SessionLocal()
+    try:
+        db.add(ConversationHistory(user_id=TEST_USER, role="user", content="turno antigo nulo 1", created_at=None))
+        db.add(ConversationHistory(user_id=TEST_USER, role="assistant", content="turno antigo nulo 2", created_at=None))
+        db.commit()
+    finally:
+        db.close()
+
+    salvar_historico(TEST_USER, "user", "turno recente válido")
+    salvar_historico(TEST_USER, "assistant", "resposta recente válida")
+    historico = carregar_historico(TEST_USER)
+    conteudos = [item["content"] for item in historico]
+
+    check("não carregou linhas sem timestamp", "turno antigo nulo 1" not in conteudos and "turno antigo nulo 2" not in conteudos, f"histórico: {conteudos}")
+    check("preservou linhas válidas recentes", conteudos == ["turno recente válido", "resposta recente válida"], f"histórico: {conteudos}")
+
+    db = SessionLocal()
+    try:
+        recente = db.query(ConversationHistory).filter(
+            ConversationHistory.user_id == TEST_USER,
+            ConversationHistory.content == "resposta recente válida",
+        ).order_by(ConversationHistory.id.desc()).first()
+        check("salvar_historico persiste created_at explicitamente", recente is not None and recente.created_at is not None, f"created_at: {getattr(recente, 'created_at', None)}")
+    finally:
+        db.close()
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -851,6 +906,8 @@ async def main():
         test_complete_task_ambiguo_nao_muta()
         test_delete_ambiguo_pede_selecao()
         test_listagem_ignora_categoria_persistida_stale()
+        test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje()
+        test_historico_ignora_registros_sem_created_at()
     finally:
         _cleanup()
 

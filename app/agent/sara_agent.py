@@ -26,7 +26,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 
 import pytz
 import anthropic
@@ -112,6 +112,9 @@ LIST_TASK_KEYWORDS = [
 BULK_COMPLETE_KEYWORDS = [
     r"\bmarqu[ea]\s+todas\b",
     r"\bmarcar?\s+todas\b",
+    r"\bmarqu[ea]\s+minhas?\s+(tarefas|atividades)\b.*\bconclu",
+    r"\bconclu[ai]\s+minhas?\s+(tarefas|atividades)\b",
+    r"\bcomplete?\s+minhas?\s+(tarefas|atividades)\b",
     r"\bconcluir\s+todas\b",
     r"\bconclu[ai]\s+todas\b",
     r"\bcomplete?\s+todas\b",
@@ -1394,6 +1397,7 @@ def carregar_historico(user_id: str) -> list[dict]:
             .filter(
                 ConversationHistory.user_id == user_id,
                 ConversationHistory.role.in_(("user", "assistant")),
+                ConversationHistory.created_at.is_not(None),
             )
             .order_by(ConversationHistory.created_at.desc())
             .limit(10)
@@ -1456,6 +1460,7 @@ def salvar_historico(user_id: str, role: str, content: str) -> None:
             user_id=user_id,
             role=role,
             content=content,
+            created_at=datetime.now(timezone.utc),
         )
         db.add(registro)
         db.commit()
