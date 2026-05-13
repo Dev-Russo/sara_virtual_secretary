@@ -538,6 +538,48 @@ def test_delete_deterministico_em_massa_por_data():
     _cleanup()
 
 
+def test_preempcao_listagem_durante_revisao():
+    print("\n[18] Preempção de listagem durante revisão")
+    _reset_capture()
+    set_session_state(TEST_USER, "reviewing_tasks", context={
+        "review_mode": "check",
+        "review_tasks": [],
+        "review_task_status_map": {},
+    }, replace_context=True)
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    _create_task("Pendência em revisão", due_date=hoje)
+
+    resposta = chat("Quais minhas tarefas pendentes?", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+
+    check("respondeu com listagem real", "Pendência em revisão" in resposta, f"resposta: {resposta}")
+    check("saiu do estado de revisão", estado == "idle", f"estado: {estado}")
+
+    _cleanup()
+
+
+def test_preempcao_backlog_durante_planning():
+    print("\n[19] Preempção de backlog durante planning")
+    _reset_capture()
+    set_session_state(TEST_USER, "planning", context={
+        "target_date": "2026-05-20",
+        "awaiting_target_date": False,
+        "review_done": False,
+        "remaining_pending": [],
+    }, replace_context=True)
+
+    _create_task("Item de backlog do planning")
+
+    resposta = chat("Backlog", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+
+    check("respondeu com backlog real", "Item de backlog do planning" in resposta, f"resposta: {resposta}")
+    check("saiu do estado de planning", estado == "idle", f"estado: {estado}")
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -563,6 +605,8 @@ async def main():
         test_prompt_bloqueia_delecao_no_fluxo_livre()
         test_delete_deterministico_por_titulo()
         test_delete_deterministico_em_massa_por_data()
+        test_preempcao_listagem_durante_revisao()
+        test_preempcao_backlog_durante_planning()
     finally:
         _cleanup()
 

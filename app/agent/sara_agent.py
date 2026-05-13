@@ -379,6 +379,49 @@ def _precisa_listar_tarefas(mensagem: str) -> bool:
     return False
 
 
+def _estado_conversacional_ativo(state: str) -> bool:
+    return state in {
+        "planning",
+        "reviewing_tasks",
+        "reviewing_pending_tasks",
+        "review_confirming",
+        "confirming_bulk_complete",
+        "confirming_backlog_review",
+        "confirming_reschedule_backlog",
+        "confirming_delete",
+    }
+
+
+def _preempt_safe_operational_intent(
+    mensagem: str,
+    user_id: str,
+    state: str,
+    home_action: str | None,
+) -> str | None:
+    if not _estado_conversacional_ativo(state):
+        return None
+
+    if home_action in {"home", "today", "backlog", "reminders"}:
+        logger.info(f"[Forced routing] Preempção de home action '{home_action}' saindo de {state} para {user_id}")
+        set_session_state(user_id, "idle")
+        return _handle_home_action(home_action, user_id, mensagem)
+
+    if _precisa_listar_tarefas(mensagem):
+        filter_date = _calcular_data_filtro(mensagem)
+        logger.info(
+            f"[Forced routing] Preempção de listagem saindo de {state} para {user_id} "
+            f"(filter_date={filter_date})"
+        )
+        set_session_state(user_id, "idle")
+        return executar_tool(
+            "list_tasks",
+            {"filter_date": filter_date} if filter_date else {},
+            user_id=user_id,
+        )
+
+    return None
+
+
 def _eh_pedido_delete(mensagem: str) -> bool:
     msg = _normalizar(mensagem)
     return any(re.search(rf"\b{kw}\b", msg) for kw in DELETE_KEYWORDS)
@@ -1450,6 +1493,12 @@ def chat(mensagem: str, user_id: str) -> str:
 
     if home_action and state == "idle":
         return _handle_home_action(home_action, user_id, mensagem)
+
+    resposta_preemptiva = _preempt_safe_operational_intent(mensagem, user_id, state, home_action)
+    if resposta_preemptiva is not None:
+        salvar_historico(user_id, "user", mensagem)
+        salvar_historico(user_id, "assistant", resposta_preemptiva)
+        return resposta_preemptiva
 
     # Acionamento manual do planejamento — só dispara se usuário está idle.
     # Se já está em planning/reviewing_tasks, ignora (não reseta histórico).

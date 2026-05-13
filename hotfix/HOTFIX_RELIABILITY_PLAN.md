@@ -22,7 +22,7 @@ Este plano esta quebrado em small patches para aplicacao incremental, validacao 
 
 - [x] Patch 01 - Bloquear delete livre no caminho geral do LLM
 - [x] Patch 02 - Criar gate deterministico para acoes destrutivas
-- [ ] Patch 03 - Dar precedencia a intents operacionais seguras
+- [x] Patch 03 - Dar precedencia a intents operacionais seguras
 - [ ] Patch 04 - Garantir read-after-write nas confirmacoes
 - [ ] Patch 05 - Corrigir confirmacao falsa no fluxo de revisao
 - [ ] Patch 06 - Fortalecer resolucao de entidade para mutacoes
