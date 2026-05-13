@@ -304,7 +304,7 @@ def tarefas_backlog_pendentes(user_id: str) -> list[Task]:
                 Task.status == "pending",
                 Task.due_date == None,
             )
-            .order_by(Task.created_at.asc())
+            .order_by(Task.created_at.asc(), Task.title.asc())
             .all()
         )
     finally:
@@ -401,8 +401,9 @@ def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
         period = str(argumentos.get("period") or "").strip()
         start_date = str(argumentos.get("start_date") or "").strip()
         end_date = str(argumentos.get("end_date") or "").strip()
-        if not period and not start_date:
-            return "Erro: informe o período antes de concluir em massa. Use today, yesterday, this_week, last_week ou start_date."
+        backlog_only = bool(argumentos.get("backlog_only"))
+        if not period and not start_date and not backlog_only:
+            return "Erro: informe o período antes de concluir em massa. Use today, yesterday, this_week, last_week, backlog ou start_date."
         if period and period not in ("today", "yesterday", "this_week", "last_week"):
             return "Erro: período inválido. Use today, yesterday, this_week ou last_week."
         for field_name, value in (("start_date", start_date), ("end_date", end_date)):
@@ -614,10 +615,45 @@ def complete_tasks_in_period(
     start_date: str = None,
     end_date: str = None,
     include_backlog: bool = False,
+    backlog_only: bool = False,
+    backlog_mode: str | None = None,
+    selection_message: str | None = None,
 ) -> str:
+    if backlog_only:
+        db = SessionLocal()
+        try:
+            tasks = (
+                db.query(Task)
+                .filter(
+                    Task.user_id == user_id,
+                    Task.status == "pending",
+                    Task.due_date == None,
+                )
+                .order_by(Task.created_at.asc())
+                .all()
+            )
+
+            if not tasks:
+                return "Não achei tarefa pendente no backlog para marcar como concluída."
+
+            for task in tasks:
+                task.status = "done"
+                task.category = None
+                task.updated_at = datetime.now(TIMEZONE)
+
+            db.commit()
+            titulos = ", ".join(f"'{t.title}'" for t in tasks)
+            return f"Marquei como concluídas as tarefas do backlog: {titulos}."
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[complete_tasks_in_period backlog_only] {e}")
+            return f"Erro ao concluir tarefas: {str(e)}"
+        finally:
+            db.close()
+
     intervalo = _periodo_para_intervalo(period, start_date, end_date)
     if not intervalo:
-        return "Me diz o período antes de marcar em massa: hoje, ontem, esta semana ou uma data específica."
+        return "Me diz o período antes de marcar em massa: hoje, ontem, esta semana, backlog ou uma data específica."
 
     label, inicio, fim = intervalo
     db = SessionLocal()
@@ -657,6 +693,54 @@ def complete_tasks_in_period(
     except Exception as e:
         db.rollback()
         logger.error(f"[complete_tasks_in_period] {e}")
+        return f"Erro ao concluir tarefas: {str(e)}"
+    finally:
+        db.close()
+
+
+def complete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
+    if not task_ids:
+        return "Nenhuma tarefa pendente encontrada para concluir."
+
+    db = SessionLocal()
+    try:
+        uuids: list[uuid.UUID] = []
+        for task_id in task_ids:
+            try:
+                uuids.append(uuid.UUID(str(task_id)))
+            except ValueError:
+                continue
+
+        if not uuids:
+            return "Nenhuma tarefa pendente encontrada para concluir."
+
+        tasks = (
+            db.query(Task)
+            .filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.id.in_(uuids),
+            )
+            .all()
+        )
+
+        if not tasks:
+            return "Nenhuma tarefa pendente encontrada para concluir."
+
+        ordem = {str(task_id): idx for idx, task_id in enumerate(task_ids)}
+        tasks.sort(key=lambda task: ordem.get(str(task.id), 9999))
+
+        for task in tasks:
+            task.status = "done"
+            task.category = None
+            task.updated_at = datetime.now(TIMEZONE)
+
+        db.commit()
+        titulos = ", ".join(f"'{t.title}'" for t in tasks)
+        return f"Marquei como concluídas as tarefas selecionadas do backlog: {titulos}."
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[complete_tasks_by_ids] {e}")
         return f"Erro ao concluir tarefas: {str(e)}"
     finally:
         db.close()

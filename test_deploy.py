@@ -580,6 +580,80 @@ def test_preempcao_backlog_durante_planning():
     _cleanup()
 
 
+def test_conclusao_em_massa_do_backlog_sem_pedir_data():
+    print("\n[20] Conclusão em massa do backlog sem pedir data")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    _create_task("Backlog 1")
+    _create_task("Backlog 2")
+    _create_task("Tarefa datada", due_date=hoje)
+
+    resposta = chat("marque todas as tarefas do backlog como concluídas", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+    resposta_confirmada = chat("sim", user_id=TEST_USER)
+
+    db = SessionLocal()
+    pendentes = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").order_by(Task.title.asc()).all()
+    concluidas = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "done").order_by(Task.title.asc()).all()
+    db.close()
+
+    check("foi direto para confirmação do backlog", "tarefas do backlog" in resposta.lower() and "confirmo?" in resposta.lower(), f"resposta: {resposta}")
+    check("entrou no estado de confirmação em massa", estado == "confirming_bulk_complete", f"estado: {estado}")
+    check("não pediu período", "de qual período" not in resposta.lower(), f"resposta: {resposta}")
+    check(
+        "confirmou conclusão do backlog",
+        "marquei como concluídas as tarefas do backlog" in resposta_confirmada.lower(),
+        f"resposta: {resposta_confirmada}",
+    )
+    check(
+        "concluiu só as tarefas sem data",
+        [task.title for task in pendentes] == ["Tarefa datada"]
+        and sorted(task.title for task in concluidas) == ["Backlog 1", "Backlog 2"],
+        f"pendentes: {[task.title for task in pendentes]} | concluidas: {[task.title for task in concluidas]}",
+    )
+
+    _cleanup()
+
+
+def test_conclusao_parcial_do_backlog_com_selecao():
+    print("\n[21] Conclusão parcial do backlog com seleção explícita")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    _create_task("Backlog A")
+    _create_task("Backlog B")
+    _create_task("Backlog C")
+
+    resposta = chat("marque tarefas do backlog como concluídas", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+    resposta_selecao = chat("1 e 3", user_id=TEST_USER)
+    resposta_confirmada = chat("sim", user_id=TEST_USER)
+
+    db = SessionLocal()
+    pendentes = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").order_by(Task.title.asc()).all()
+    concluidas = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "done").order_by(Task.title.asc()).all()
+    db.close()
+
+    check("listou opções do backlog", "quais tarefas do backlog" in resposta.lower(), f"resposta: {resposta}")
+    check("entrou no estado de confirmação em massa", estado == "confirming_bulk_complete", f"estado: {estado}")
+    check("seleção gerou preview", "Backlog A" in resposta_selecao and "Backlog C" in resposta_selecao and "Confirmo?" in resposta_selecao, f"resposta: {resposta_selecao}")
+    check(
+        "confirmou conclusão parcial",
+        "marquei como concluídas as tarefas selecionadas do backlog" in resposta_confirmada.lower(),
+        f"resposta: {resposta_confirmada}",
+    )
+    check(
+        "concluiu apenas os itens escolhidos",
+        [task.title for task in pendentes] == ["Backlog B"]
+        and sorted(task.title for task in concluidas) == ["Backlog A", "Backlog C"],
+        f"pendentes: {[task.title for task in pendentes]} | concluidas: {[task.title for task in concluidas]}",
+    )
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -607,6 +681,8 @@ async def main():
         test_delete_deterministico_em_massa_por_data()
         test_preempcao_listagem_durante_revisao()
         test_preempcao_backlog_durante_planning()
+        test_conclusao_em_massa_do_backlog_sem_pedir_data()
+        test_conclusao_parcial_do_backlog_com_selecao()
     finally:
         _cleanup()
 

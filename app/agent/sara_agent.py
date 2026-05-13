@@ -38,6 +38,7 @@ from app.agent.tools import (
     _validar_argumentos,
     TIMEZONE,
     complete_task_by_id,
+    complete_tasks_by_ids,
     complete_tasks_in_period,
     delete_tasks_by_ids,
     list_reminders,
@@ -304,6 +305,9 @@ def _precisa_concluir_periodo(mensagem: str) -> bool:
     msg_lower = mensagem.lower().strip()
     if msg_lower in {"tudo", "tudo certo", "ok", "sim"}:
         return False
+    msg_norm = _normalizar(mensagem)
+    if re.search(r"\bbacklog\b", msg_norm) and re.search(r"\b(marca|marque|marcar|conclui|concluir|conclua|complete|completar|finaliza|finalizar)\b", msg_norm):
+        return True
     for pattern in BULK_COMPLETE_KEYWORDS:
         if re.search(pattern, msg_lower):
             return True
@@ -312,6 +316,10 @@ def _precisa_concluir_periodo(mensagem: str) -> bool:
 
 def _detectar_periodo_conclusao(mensagem: str) -> dict | None:
     msg_lower = mensagem.lower().strip()
+    msg_norm = _normalizar(mensagem)
+    if re.search(r"\bbacklog\b", msg_norm):
+        backlog_mode = "all" if re.search(r"\b(todas|todos|tudo)\b", msg_norm) else "select"
+        return {"backlog_only": True, "backlog_mode": backlog_mode}
     if re.search(r"\bsemana\s+passada\b", msg_lower):
         return {"period": "last_week"}
     if re.search(r"\b(essa|esta)\s+semana\b|\bda\s+semana\b", msg_lower):
@@ -328,9 +336,70 @@ def _detectar_periodo_conclusao(mensagem: str) -> dict | None:
 
 
 def _preparar_confirmacao_conclusao_periodo(user_id: str, periodo: dict) -> str:
+    if periodo.get("backlog_only"):
+        tarefas = tarefas_backlog_pendentes(user_id)
+        if not tarefas:
+            set_session_state(user_id, "idle")
+            return "Não achei tarefa pendente no backlog."
+
+        tarefas_serializadas = _serializar_tarefas_revisao(tarefas)
+        selecionadas = _selecionar_tarefas_reagendamento_backlog(
+            periodo.get("selection_message", ""),
+            tarefas_serializadas,
+        )
+
+        if periodo.get("backlog_mode") == "select" and not selecionadas:
+            linhas = "\n".join(f"{idx}. {task.title}" for idx, task in enumerate(tarefas, start=1))
+            set_session_state(
+                user_id,
+                "confirming_bulk_complete",
+                context={
+                    "bulk_complete_period": periodo,
+                    "bulk_complete_label": "backlog",
+                    "bulk_complete_backlog_tasks": tarefas_serializadas,
+                    "bulk_complete_selected_task_ids": [],
+                },
+                replace_context=True,
+            )
+            return (
+                "Quais tarefas do backlog você quer marcar como concluídas?\n\n"
+                f"{linhas}\n\n"
+                "Me manda os números, os nomes ou \"todas\"."
+            )
+
+        if periodo.get("backlog_mode") == "select":
+            tarefas_escolhidas = [task for task in tarefas_serializadas if task["task_id"] in selecionadas]
+            linhas = "\n".join(f"• {task['title']}" for task in tarefas_escolhidas)
+            set_session_state(
+                user_id,
+                "confirming_bulk_complete",
+                context={
+                    "bulk_complete_period": periodo,
+                    "bulk_complete_label": "backlog",
+                    "bulk_complete_backlog_tasks": tarefas_serializadas,
+                    "bulk_complete_selected_task_ids": selecionadas,
+                },
+                replace_context=True,
+            )
+            return f"Vou marcar como concluídas estas tarefas do backlog:\n\n{linhas}\n\nConfirmo?"
+
+        linhas = "\n".join(f"• {task.title}" for task in tarefas)
+        set_session_state(
+            user_id,
+            "confirming_bulk_complete",
+            context={
+                "bulk_complete_period": periodo,
+                "bulk_complete_label": "backlog",
+                "bulk_complete_backlog_tasks": tarefas_serializadas,
+                "bulk_complete_selected_task_ids": [task["task_id"] for task in tarefas_serializadas],
+            },
+            replace_context=True,
+        )
+        return f"Vou marcar como concluídas as tarefas do backlog:\n\n{linhas}\n\nConfirmo?"
+
     label, tarefas = tarefas_pendentes_no_periodo(user_id=user_id, **periodo)
     if not label:
-        return "Não entendi o período. Pode me dizer se é hoje, ontem, esta semana ou uma data específica?"
+        return "Não entendi o período. Pode me dizer se é hoje, ontem, esta semana, backlog ou uma data específica?"
     if not tarefas:
         set_session_state(user_id, "idle")
         return f"Não achei tarefa pendente em {label}."
@@ -354,11 +423,36 @@ def _tratar_confirmacao_conclusao_periodo(user_id: str, mensagem: str, contexto:
     if not periodo:
         periodo = _detectar_periodo_conclusao(mensagem)
         if not periodo:
-            return "De qual período? Hoje, ontem, esta semana ou uma data específica."
+            return "De qual período? Hoje, ontem, esta semana, backlog ou uma data específica."
         return _preparar_confirmacao_conclusao_periodo(user_id, periodo)
 
+    if periodo.get("backlog_only") and periodo.get("backlog_mode") == "select":
+        tarefas = contexto.get("bulk_complete_backlog_tasks", [])
+        selecionadas = contexto.get("bulk_complete_selected_task_ids", [])
+
+        if not selecionadas:
+            selecionadas = _selecionar_tarefas_reagendamento_backlog(mensagem, tarefas)
+            if not selecionadas:
+                return "Me diz quais tarefas do backlog você quer concluir: números, nomes ou \"todas\"."
+
+            escolhidas = [task for task in tarefas if task["task_id"] in selecionadas]
+            linhas = "\n".join(f"• {task['title']}" for task in escolhidas)
+            set_session_state(
+                user_id,
+                "confirming_bulk_complete",
+                context={
+                    **contexto,
+                    "bulk_complete_selected_task_ids": selecionadas,
+                },
+                replace_context=True,
+            )
+            return f"Vou marcar como concluídas estas tarefas do backlog:\n\n{linhas}\n\nConfirmo?"
+
     if _is_affirmative(mensagem):
-        resultado = complete_tasks_in_period(user_id=user_id, **periodo)
+        if periodo.get("backlog_only") and periodo.get("backlog_mode") == "select":
+            resultado = complete_tasks_by_ids(contexto.get("bulk_complete_selected_task_ids", []), user_id)
+        else:
+            resultado = complete_tasks_in_period(user_id=user_id, **periodo)
         set_session_state(user_id, "idle")
         salvar_historico(user_id, "user", mensagem)
         salvar_historico(user_id, "assistant", resultado)
@@ -366,9 +460,13 @@ def _tratar_confirmacao_conclusao_periodo(user_id: str, mensagem: str, contexto:
 
     novo_periodo = _detectar_periodo_conclusao(mensagem)
     if novo_periodo:
+        if novo_periodo.get("backlog_only") and periodo.get("backlog_only"):
+            novo_periodo["selection_message"] = mensagem
         return _preparar_confirmacao_conclusao_periodo(user_id, novo_periodo)
 
-    return f"Se estiver certo marcar as tarefas de {contexto.get('bulk_complete_label', 'desse período')}, manda um sim. Se não, me fala outro período."
+    label = contexto.get("bulk_complete_label", "desse período")
+    artigo = "do" if label == "backlog" else "de"
+    return f"Se estiver certo marcar as tarefas {artigo} {label}, manda um sim. Se não, me fala outro período."
 
 
 def _precisa_listar_tarefas(mensagem: str) -> bool:

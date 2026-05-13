@@ -29,6 +29,8 @@ Este plano esta quebrado em small patches para aplicacao incremental, validacao 
 - [x] Patch 07 - Cobrir regressao critica com testes
 - [ ] Patch 08 - Revisar consistencia backlog/categorias
 - [ ] Patch 09 - Auditar logs e observabilidade de incidentes
+- [x] Patch 10 - Permitir conclusão em massa do backlog sem exigir data
+- [x] Patch 11 - Permitir seleção parcial determinística ao concluir backlog
 
 ---
 
@@ -322,6 +324,75 @@ Sem trilha completa por turno fica dificil fechar RCA rapido.
 ### Validacao
 
 1. Para um incidente, deve ser possivel reconstruir turno, estado, tool e efeito.
+
+### Risco
+
+Baixo.
+
+---
+
+## Patch 10 - Permitir conclusão em massa do backlog sem exigir data
+
+### Prioridade
+
+P1
+
+### Problema
+
+Ao pedir para concluir tarefas em massa no backlog, o fluxo caia na regra de período explícito e pedia data, mesmo quando o alvo já era claramente o backlog.
+
+### Mudanca
+
+1. Tratar `backlog` como alvo explícito de conclusão em massa.
+2. Abrir confirmação determinística com preview das tarefas sem data.
+3. Concluir apenas tarefas do backlog após confirmação.
+
+### Arquivos alvo
+
+1. `app/agent/sara_agent.py`
+2. `app/agent/tools.py`
+3. `test_deploy.py`
+
+### Validacao
+
+1. Pedido de concluir backlog não pede data.
+2. O preview mostra apenas tarefas sem `due_date`.
+3. A confirmação conclui só backlog, preservando tarefas datadas.
+
+### Risco
+
+Baixo.
+
+---
+
+## Patch 11 - Permitir seleção parcial determinística ao concluir backlog
+
+### Prioridade
+
+P1
+
+### Problema
+
+O fluxo do backlog passou a aceitar concluir tudo sem data, mas ainda faltava concluir apenas parte dele com segurança.
+
+### Mudanca
+
+1. Quando o pedido menciona backlog sem "todas", a Sara lista os itens candidatos.
+2. O usuário escolhe por número, nome ou "todas".
+3. A Sara mostra preview da seleção.
+4. A conclusão só acontece após confirmação explícita.
+
+### Arquivos alvo
+
+1. `app/agent/sara_agent.py`
+2. `app/agent/tools.py`
+3. `test_deploy.py`
+
+### Validacao
+
+1. Pedido parcial do backlog não conclui nada de imediato.
+2. A seleção gera preview determinístico.
+3. Apenas os itens selecionados são concluídos.
 
 ### Risco
 
