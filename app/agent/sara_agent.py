@@ -1112,18 +1112,41 @@ def _aplicar_revisao(user_id: str, contexto: dict) -> str:
     pending_action = contexto.get("pending_action", "keep")
     pending_date = contexto.get("pending_date")
 
+    done_confirmadas: list[str] = []
+    moved_confirmadas: list[str] = []
+    pending_confirmadas: list[str] = []
+    falhas: list[str] = []
+
     for task_id in done_ids:
-        complete_task_by_id(task_id, user_id)
+        resultado = complete_task_by_id(task_id, user_id)
+        if "marcada como concluída" in resultado.lower():
+            if task_id in task_map:
+                done_confirmadas.append(task_map[task_id]["title"])
+        elif task_id in task_map:
+            falhas.append(task_map[task_id]["title"])
 
     if pending_action == "move" and pending_date:
         for task_id in pending_ids:
-            reschedule_task(task_id, user_id, pending_date)
+            resultado = reschedule_task(task_id, user_id, pending_date)
+            if "reagendada para" in resultado.lower():
+                if task_id in task_map:
+                    moved_confirmadas.append(task_map[task_id]["title"])
+            elif task_id in task_map:
+                falhas.append(task_map[task_id]["title"])
+    else:
+        pending_confirmadas = [
+            task_map[task_id]["title"]
+            for task_id in pending_ids
+            if task_id in task_map
+        ]
 
     resumo = mensagem_revisao_aplicada(
-        [task_map[task_id]["title"] for task_id in done_ids if task_id in task_map],
-        [task_map[task_id]["title"] for task_id in pending_ids if task_id in task_map],
+        done_confirmadas,
+        moved_confirmadas if pending_action == "move" and pending_date else pending_confirmadas,
         pending_date if pending_action == "move" else None,
     )
+    if falhas:
+        resumo += " Não consegui aplicar tudo em: " + ", ".join(falhas) + "."
 
     if contexto.get("review_mode") == "check":
         set_session_state(user_id, "idle")

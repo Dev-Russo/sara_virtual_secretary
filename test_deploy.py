@@ -708,6 +708,41 @@ def test_write_tool_ignora_confirmacao_falsa_do_llm():
     _cleanup()
 
 
+def test_revisao_confirma_so_o_que_persistiu():
+    print("\n[23] Revisão confirma só o que persistiu")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    task_id = _create_task("Tarefa válida da revisão", due_date=hoje)
+
+    contexto = {
+        "review_mode": "check",
+        "review_tasks": [
+            {"task_id": task_id, "title": "Tarefa válida da revisão"},
+            {"task_id": "00000000-0000-0000-0000-000000000001", "title": "Tarefa inválida da revisão"},
+        ],
+        "done_task_ids": [task_id, "00000000-0000-0000-0000-000000000001"],
+        "pending_task_ids": [],
+        "pending_action": "keep",
+        "pending_date": None,
+        "review_done": True,
+    }
+    set_session_state(TEST_USER, "review_confirming", context=contexto, replace_context=True)
+
+    resposta = chat("ok", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefa_valida = db.query(Task).filter(Task.id == task_id).first()
+    db.close()
+
+    check("confirmou só a tarefa válida", resposta.startswith("Marquei como feitas: Tarefa válida da revisão."), f"resposta: {resposta}")
+    check("sinalizou falha no item inválido", "Não consegui aplicar tudo em: Tarefa inválida da revisão." in resposta, f"resposta: {resposta}")
+    check("persistiu conclusão da tarefa válida", tarefa_valida is not None and tarefa_valida.status == "done", f"status: {tarefa_valida.status if tarefa_valida else 'não encontrada'}")
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -738,6 +773,7 @@ async def main():
         test_conclusao_em_massa_do_backlog_sem_pedir_data()
         test_conclusao_parcial_do_backlog_com_selecao()
         test_write_tool_ignora_confirmacao_falsa_do_llm()
+        test_revisao_confirma_so_o_que_persistiu()
     finally:
         _cleanup()
 
