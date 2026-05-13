@@ -43,6 +43,7 @@ from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.user_session import UserSession
 from app.agent.session import get_session_state, set_session_state, get_session_context
+from app.agent.prompts import get_system_prompt
 from app.agent.sara_agent import (
     _quer_iniciar_planejamento,
     _quer_sair_planejamento,
@@ -51,6 +52,7 @@ from app.agent.sara_agent import (
     toggle_review_task,
     finalizar_revisao,
 )
+from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA
 import app.scheduler.jobs as jobs
 from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao, iniciar_revisao_check
 
@@ -431,6 +433,32 @@ def test_reagendar_backlog_deterministico():
     _cleanup()
 
 
+def test_tools_destrutivas_fora_do_schema_geral():
+    print("\n[14] Tools destrutivas fora do schema geral do LLM")
+
+    tool_names = {tool["name"] for tool in TOOLS_SCHEMA}
+
+    check("delete_task não está no TOOLS_SCHEMA", "delete_task" not in tool_names, f"tools: {sorted(tool_names)}")
+    check("delete_all_tasks não está no TOOLS_SCHEMA", "delete_all_tasks" not in tool_names, f"tools: {sorted(tool_names)}")
+    check("delete_task continua disponível internamente", "delete_task" in TOOLS_MAP)
+    check("delete_all_tasks continua disponível internamente", "delete_all_tasks" in TOOLS_MAP)
+
+
+def test_prompt_bloqueia_delecao_no_fluxo_livre():
+    print("\n[15] Prompt do fluxo livre bloqueia deleção")
+
+    prompt = get_system_prompt(TEST_USER)
+
+    check(
+        "prompt menciona remoção fora do fluxo livre",
+        "Operações destrutivas de deleção NÃO estão disponíveis neste fluxo livre." in prompt,
+    )
+    check(
+        "prompt não anuncia delete_task como tool do fluxo livre",
+        "delete_task, delete_all_tasks" not in prompt,
+    )
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -452,6 +480,8 @@ async def main():
         await test_fluxo_revisao_em_lote()
         await test_revisao_check()
         test_reagendar_backlog_deterministico()
+        test_tools_destrutivas_fora_do_schema_geral()
+        test_prompt_bloqueia_delecao_no_fluxo_livre()
     finally:
         _cleanup()
 
