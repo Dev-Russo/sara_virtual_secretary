@@ -20,6 +20,7 @@ import asyncio
 import sys
 from datetime import datetime, timedelta
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytz
 
@@ -54,6 +55,7 @@ from app.agent.sara_agent import (
 )
 from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA
 import app.scheduler.jobs as jobs
+from app.agent import sara_agent as sara_agent_module
 from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao, iniciar_revisao_check
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
@@ -123,6 +125,23 @@ def _freeze_jobs_now(frozen_dt: datetime):
         yield
     finally:
         jobs.datetime = real_datetime
+
+
+@contextmanager
+def _mock_anthropic_responses(responses: list[object]):
+    original_create = sara_agent_module.anthropic_client.messages.create
+    queue = list(responses)
+
+    def fake_create(*args, **kwargs):
+        if not queue:
+            raise AssertionError("Anthropic response queue exhausted")
+        return queue.pop(0)
+
+    sara_agent_module.anthropic_client.messages.create = fake_create
+    try:
+        yield
+    finally:
+        sara_agent_module.anthropic_client.messages.create = original_create
 
 
 # ─── Testes ───────────────────────────────────────────────────────────────
@@ -654,6 +673,41 @@ def test_conclusao_parcial_do_backlog_com_selecao():
     _cleanup()
 
 
+def test_write_tool_ignora_confirmacao_falsa_do_llm():
+    print("\n[22] Write tool ignora confirmação falsa do LLM")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    tool_use_response = SimpleNamespace(
+        stop_reason="tool_use",
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                name="save_task",
+                input={"title": "Alongamento guiado"},
+                id="toolu_test_save_task",
+            )
+        ],
+    )
+    fake_second_response = SimpleNamespace(
+        stop_reason="end_turn",
+        content=[SimpleNamespace(type="text", text="Feito! Já marquei como concluída.")],
+    )
+
+    with _mock_anthropic_responses([tool_use_response, fake_second_response]):
+        resposta = chat("tenho que fazer alongamento guiado em breve", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefas = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").all()
+    db.close()
+
+    check("retornou resultado da tool, não a frase falsa", "Tarefa 'Alongamento guiado' salva com sucesso" in resposta, f"resposta: {resposta}")
+    check("não retornou confirmação mentirosa do segundo turno", "Já marquei como concluída" not in resposta, f"resposta: {resposta}")
+    check("a tarefa foi persistida", any(task.title == "Alongamento guiado" for task in tarefas), f"tarefas: {[task.title for task in tarefas]}")
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -683,6 +737,7 @@ async def main():
         test_preempcao_backlog_durante_planning()
         test_conclusao_em_massa_do_backlog_sem_pedir_data()
         test_conclusao_parcial_do_backlog_com_selecao()
+        test_write_tool_ignora_confirmacao_falsa_do_llm()
     finally:
         _cleanup()
 

@@ -709,6 +709,72 @@ def _formatar_confirmacao_tarefas_salvas(titles: list[str], due_date: str | None
     return f"Anotei para {display}: " + ", ".join(titles) + "."
 
 
+def _confirmar_tarefas_salvas_pos_write(
+    user_id: str,
+    titles: list[str],
+    due_date: str | None,
+    fallback_result: str,
+) -> str:
+    if not titles:
+        return fallback_result
+
+    titulo_norms = {_normalizar(title): title for title in titles}
+    due_date_match: datetime | None = None
+    if due_date:
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                due_date_match = TIMEZONE.localize(datetime.strptime(due_date.strip(), fmt))
+                break
+            except ValueError:
+                continue
+
+    db = SessionLocal()
+    try:
+        tarefas = (
+            db.query(Task)
+            .filter(Task.user_id == user_id, Task.status == "pending")
+            .order_by(Task.created_at.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+    confirmadas: list[Task] = []
+    for task in tarefas:
+        if _normalizar(task.title) not in titulo_norms:
+            continue
+        if due_date_match is None and task.due_date is not None:
+            continue
+        if due_date_match is not None:
+            due_at = task.due_date
+            if due_at is None:
+                continue
+            if due_at.tzinfo is None:
+                due_at = pytz.utc.localize(due_at).astimezone(TIMEZONE)
+            else:
+                due_at = due_at.astimezone(TIMEZONE)
+            if due_at != due_date_match:
+                continue
+        confirmadas.append(task)
+
+    if len(confirmadas) != len(titles):
+        return fallback_result
+
+    confirmadas.sort(key=lambda task: titles.index(next(title for title in titles if _normalizar(title) == _normalizar(task.title))))
+    titulos_confirmados = [task.title for task in confirmadas]
+
+    if not due_date:
+        if len(titulos_confirmados) == 1:
+            return mensagem_tarefa_backlog_salva(titulos_confirmados[0])
+        return "Anotei no backlog: " + ", ".join(titulos_confirmados) + ". Depois a gente encaixa isso num dia."
+
+    try:
+        display = datetime.strptime(due_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        display = due_date
+    return f"Anotei para {display}: " + ", ".join(titulos_confirmados) + "."
+
+
 def _quer_reagendar_backlog(mensagem: str) -> bool:
     msg = _normalizar(mensagem)
     if not re.search(r"\bbacklog\b", msg):
@@ -1660,7 +1726,7 @@ def chat(mensagem: str, user_id: str) -> str:
             return resultado
         if "já existe" in resultado.lower():
             return resultado
-        return mensagem_tarefa_backlog_salva(titulo)
+        return _confirmar_tarefas_salvas_pos_write(user_id, [titulo], None, resultado)
 
     if state == "reviewing_tasks":
         if _quer_sair_planejamento(mensagem):
@@ -1773,7 +1839,12 @@ def chat(mensagem: str, user_id: str) -> str:
     if pedido_tarefa:
         titles, due_date = pedido_tarefa
         resultado = save_tasks(titles, user_id=user_id, due_date=due_date)
-        resposta = _formatar_confirmacao_tarefas_salvas(titles, due_date, resultado)
+        resposta = _confirmar_tarefas_salvas_pos_write(
+            user_id,
+            titles,
+            due_date,
+            _formatar_confirmacao_tarefas_salvas(titles, due_date, resultado),
+        )
         salvar_historico(user_id, "user", mensagem)
         salvar_historico(user_id, "assistant", resposta)
         return resposta
@@ -1832,33 +1903,36 @@ def chat(mensagem: str, user_id: str) -> str:
 
             messages.append({"role": "user", "content": result_contents})
 
-            # Para operações de escrita, reforça no system prompt da segunda chamada
-            WRITE_TOOLS = {"save_task", "create_reminder", "complete_task", "reschedule_task"}
-            system2 = system_prompt
-            if tools_usadas & WRITE_TOOLS:
-                system2 += (
-                    "\n\nINSTRUÇÃO OBRIGATÓRIA PARA ESTA RESPOSTA: Confirme APENAS a operação "
-                    "acima que acabou de ser executada. NÃO mencione outras tarefas, lembretes "
-                    "ou histórico. NÃO invente contexto adicional. Seja direto e objetivo."
-                )
-
-            # Segunda chamada — formula resposta final
-            response2 = anthropic_client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=ANTHROPIC_MAX_TOKENS,
-                system=system2,
-                messages=messages,
-            )
-            resposta = _extrair_texto(response2.content)
-
-            # Verifica grounding
+            # Para operações de escrita, responde a partir do resultado real persistido
+            WRITE_TOOLS = {
+                "save_task",
+                "create_reminder",
+                "complete_task",
+                "complete_tasks_in_period",
+                "reschedule_task",
+                "delete_task",
+                "delete_all_tasks",
+            }
             combined_tool_result = "\n".join(tool_results)
-            if not _verificar_grounding(combined_tool_result, resposta):
-                logger.warning(
-                    f"[Grounding] Resposta não corresponde aos dados da tool. "
-                    f"Tool: {combined_tool_result[:100]}... | LLM: {resposta[:100]}..."
+            if tools_usadas & WRITE_TOOLS:
+                resposta = combined_tool_result
+            else:
+                system2 = system_prompt
+                response2 = anthropic_client.messages.create(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=ANTHROPIC_MAX_TOKENS,
+                    system=system2,
+                    messages=messages,
                 )
-                resposta = _corrigir_resposta_sem_grounding(combined_tool_result, mensagem)
+                resposta = _extrair_texto(response2.content)
+
+                # Verifica grounding
+                if not _verificar_grounding(combined_tool_result, resposta):
+                    logger.warning(
+                        f"[Grounding] Resposta não corresponde aos dados da tool. "
+                        f"Tool: {combined_tool_result[:100]}... | LLM: {resposta[:100]}..."
+                    )
+                    resposta = _corrigir_resposta_sem_grounding(combined_tool_result, mensagem)
 
         # CAMINHO 2 — resposta direta sem tools
         else:
