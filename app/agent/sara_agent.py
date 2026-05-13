@@ -615,10 +615,33 @@ def _preparar_confirmacao_delete(user_id: str, tarefas: list[Task], *, label: st
         set_session_state(user_id, "idle")
         return f"Não achei tarefa pendente para deletar em {label}." if label != "essa seleção" else "Não achei tarefa pendente para deletar."
 
+    tarefas_serializadas = _serializar_tarefas_revisao(tarefas)
+    if label == "essa seleção" and len(tarefas_serializadas) > 1:
+        linhas = "\n".join(f"{idx}. {task['title']}" for idx, task in enumerate(tarefas_serializadas, start=1))
+        set_session_state(
+            user_id,
+            "confirming_delete",
+            context={
+                "delete_task_ids": [task["task_id"] for task in tarefas_serializadas],
+                "delete_task_titles": [task["title"] for task in tarefas_serializadas],
+                "delete_tasks": tarefas_serializadas,
+                "delete_selected_task_ids": [],
+                "delete_label": label,
+            },
+            replace_context=True,
+        )
+        return (
+            "Encontrei mais de uma tarefa para deletar:\n\n"
+            f"{linhas}\n\n"
+            "Me manda os números, os nomes ou \"todas\"."
+        )
+
     titulos = [task.title for task in tarefas]
     context = {
         "delete_task_ids": [str(task.id) for task in tarefas],
         "delete_task_titles": titulos,
+        "delete_tasks": tarefas_serializadas,
+        "delete_selected_task_ids": [task["task_id"] for task in tarefas_serializadas],
         "delete_label": label,
     }
     set_session_state(user_id, "confirming_delete", context=context, replace_context=True)
@@ -649,6 +672,26 @@ def _tratar_confirmacao_delete(user_id: str, mensagem: str, contexto: dict) -> s
         set_session_state(user_id, "idle")
         return "Beleza, não deletei nada."
 
+    tarefas = contexto.get("delete_tasks", [])
+    selecionadas = contexto.get("delete_selected_task_ids", [])
+    if tarefas and not selecionadas:
+        selecionadas = _selecionar_tarefas_reagendamento_backlog(mensagem, tarefas)
+        if not selecionadas:
+            return "Me diz quais tarefas você quer deletar: números, nomes ou \"todas\"."
+
+        escolhidas = [task for task in tarefas if task["task_id"] in selecionadas]
+        linhas = "\n".join(f"• {task['title']}" for task in escolhidas)
+        set_session_state(
+            user_id,
+            "confirming_delete",
+            context={
+                **contexto,
+                "delete_selected_task_ids": selecionadas,
+            },
+            replace_context=True,
+        )
+        return f"Vou deletar estas tarefas:\n\n{linhas}\n\nConfirmo?"
+
     if not _is_affirmative(mensagem):
         titulos = contexto.get("delete_task_titles", [])
         if not titulos:
@@ -656,7 +699,10 @@ def _tratar_confirmacao_delete(user_id: str, mensagem: str, contexto: dict) -> s
             return "Não achei a seleção pendente para deletar."
         return "Se estiver certo, manda um sim. Se não, manda não."
 
-    resultado = delete_tasks_by_ids(contexto.get("delete_task_ids", []), user_id)
+    resultado = delete_tasks_by_ids(
+        contexto.get("delete_selected_task_ids") or contexto.get("delete_task_ids", []),
+        user_id,
+    )
     set_session_state(user_id, "idle")
     salvar_historico(user_id, "user", mensagem)
     salvar_historico(user_id, "assistant", resultado)

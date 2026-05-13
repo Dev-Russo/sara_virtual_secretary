@@ -25,7 +25,7 @@ Este plano esta quebrado em small patches para aplicacao incremental, validacao 
 - [x] Patch 03 - Dar precedencia a intents operacionais seguras
 - [x] Patch 04 - Garantir read-after-write nas confirmacoes
 - [x] Patch 05 - Corrigir confirmacao falsa no fluxo de revisao
-- [ ] Patch 06 - Fortalecer resolucao de entidade para mutacoes
+- [x] Patch 06 - Fortalecer resolucao de entidade para mutacoes
 - [x] Patch 07 - Cobrir regressao critica com testes
 - [ ] Patch 08 - Revisar consistencia backlog/categorias
 - [ ] Patch 09 - Auditar logs e observabilidade de incidentes

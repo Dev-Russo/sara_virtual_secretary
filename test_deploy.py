@@ -57,6 +57,7 @@ from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA
 import app.scheduler.jobs as jobs
 from app.agent import sara_agent as sara_agent_module
 from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao, iniciar_revisao_check
+from app.agent.tools import complete_task
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -743,6 +744,52 @@ def test_revisao_confirma_so_o_que_persistiu():
     _cleanup()
 
 
+def test_complete_task_ambiguo_nao_muta():
+    print("\n[24] complete_task ambíguo não muta")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    _create_task("Estudar inglês")
+    _create_task("Estudar docker")
+
+    resposta = complete_task("Estudar", TEST_USER)
+
+    db = SessionLocal()
+    pendentes = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").order_by(Task.title.asc()).all()
+    concluidas = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "done").all()
+    db.close()
+
+    check("retornou mensagem de ambiguidade", "Encontrei mais de uma tarefa para concluir com 'Estudar'" in resposta, f"resposta: {resposta}")
+    check("não concluiu nada por heurística frouxa", len(concluidas) == 0 and len(pendentes) == 2, f"pendentes: {[task.title for task in pendentes]} | concluidas: {len(concluidas)}")
+
+    _cleanup()
+
+
+def test_delete_ambiguo_pede_selecao():
+    print("\n[25] Delete ambíguo pede seleção antes de confirmar")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    _create_task("Estudar inglês")
+    _create_task("Estudar docker")
+
+    resposta = chat("apaga estudar", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+    resposta_selecao = chat("2", user_id=TEST_USER)
+    resposta_confirmada = chat("sim", user_id=TEST_USER)
+
+    db = SessionLocal()
+    pendentes = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").order_by(Task.title.asc()).all()
+    db.close()
+
+    check("pediu seleção ao invés de deletar tudo", "Encontrei mais de uma tarefa para deletar" in resposta, f"resposta: {resposta}")
+    check("entrou no estado de confirmação de delete", estado == "confirming_delete", f"estado: {estado}")
+    check("seleção gerou preview do item escolhido", "Estudar inglês" not in resposta_selecao and "Estudar docker" in resposta_selecao and "Confirmo?" in resposta_selecao, f"resposta: {resposta_selecao}")
+    check("deletou só o item escolhido", [task.title for task in pendentes] == ["Estudar inglês"], f"pendentes: {[task.title for task in pendentes]} | resposta: {resposta_confirmada}")
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -774,6 +821,8 @@ async def main():
         test_conclusao_parcial_do_backlog_com_selecao()
         test_write_tool_ignora_confirmacao_falsa_do_llm()
         test_revisao_confirma_so_o_que_persistiu()
+        test_complete_task_ambiguo_nao_muta()
+        test_delete_ambiguo_pede_selecao()
     finally:
         _cleanup()
 

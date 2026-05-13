@@ -107,6 +107,51 @@ def _buscar_tarefa_duplicada(db, user_id: str, title: str, due_date: datetime | 
     return None
 
 
+def _buscar_tarefas_por_titulo(db, user_id: str, title: str) -> list[Task]:
+    title = str(title or "").strip()
+    if not title:
+        return []
+
+    tarefas = (
+        db.query(Task)
+        .filter(
+            Task.user_id == user_id,
+            Task.status == "pending",
+            Task.title.ilike(f"%{title}%"),
+        )
+        .order_by(Task.created_at.asc(), Task.title.asc())
+        .all()
+    )
+    if tarefas:
+        return tarefas
+
+    palavras = [p for p in title.split() if len(p) > 3]
+    candidatos: dict[str, Task] = {}
+    for palavra in palavras:
+        encontrados = (
+            db.query(Task)
+            .filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.title.ilike(f"%{palavra}%"),
+            )
+            .order_by(Task.created_at.asc(), Task.title.asc())
+            .all()
+        )
+        for task in encontrados:
+            candidatos[str(task.id)] = task
+    return list(candidatos.values())
+
+
+def _mensagem_ambiguidade_tarefas(title: str, tarefas: list[Task], acao: str) -> str:
+    linhas = "\n".join(f"{idx}. {task.title}" for idx, task in enumerate(tarefas, start=1))
+    return (
+        f"Encontrei mais de uma tarefa para {acao} com '{title}':\n\n"
+        f"{linhas}\n\n"
+        "Me fala qual delas pelo número ou por um nome mais específico."
+    )
+
+
 def _intervalo_data_local(valor: date) -> tuple[datetime, datetime]:
     inicio = TIMEZONE.localize(datetime.combine(valor, datetime.min.time()))
     fim = TIMEZONE.localize(datetime.combine(valor, datetime.max.time().replace(microsecond=0)))
@@ -749,25 +794,13 @@ def complete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
 def complete_task(title: str, user_id: str) -> str:
     db = SessionLocal()
     try:
-        task = db.query(Task).filter(
-            Task.user_id == user_id,
-            Task.status == "pending",
-            Task.title.ilike(f"%{title}%"),
-        ).first()
-
-        if not task:
-            palavras = [p for p in title.split() if len(p) > 3]
-            for palavra in palavras:
-                task = db.query(Task).filter(
-                    Task.user_id == user_id,
-                    Task.status == "pending",
-                    Task.title.ilike(f"%{palavra}%"),
-                ).first()
-                if task:
-                    break
-
-        if not task:
+        tarefas = _buscar_tarefas_por_titulo(db, user_id, title)
+        if not tarefas:
             return f"Nenhuma tarefa pendente encontrada com '{title}'."
+        if len(tarefas) > 1:
+            return _mensagem_ambiguidade_tarefas(title, tarefas, "concluir")
+
+        task = tarefas[0]
 
         task.status = "done"
         task.category = None
@@ -815,25 +848,13 @@ def delete_task(title: str, user_id: str) -> str:
     """
     db = SessionLocal()
     try:
-        task = db.query(Task).filter(
-            Task.user_id == user_id,
-            Task.status == "pending",
-            Task.title.ilike(f"%{title}%"),
-        ).first()
-
-        if not task:
-            palavras = [p for p in title.split() if len(p) > 3]
-            for palavra in palavras:
-                task = db.query(Task).filter(
-                    Task.user_id == user_id,
-                    Task.status == "pending",
-                    Task.title.ilike(f"%{palavra}%"),
-                ).first()
-                if task:
-                    break
-
-        if not task:
+        tarefas = _buscar_tarefas_por_titulo(db, user_id, title)
+        if not tarefas:
             return f"Nenhuma tarefa pendente encontrada com '{title}'."
+        if len(tarefas) > 1:
+            return _mensagem_ambiguidade_tarefas(title, tarefas, "deletar")
+
+        task = tarefas[0]
 
         titulo = task.title
         db.delete(task)
