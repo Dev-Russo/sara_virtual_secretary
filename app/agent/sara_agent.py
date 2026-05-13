@@ -1497,6 +1497,28 @@ def _log_tool_call(
         db.close()
 
 
+def _log_turn_summary(
+    *,
+    user_id: str,
+    route: str,
+    state_before: str,
+    state_after: str,
+    user_message: str,
+    assistant_response: str,
+    tools_used: list[str] | None = None,
+) -> None:
+    logger.info(
+        "[Turn] user=%s route=%s state_before=%s state_after=%s tools=%s user_message=%r assistant_response=%r",
+        user_id,
+        route,
+        state_before,
+        state_after,
+        tools_used or [],
+        user_message,
+        assistant_response,
+    )
+
+
 # ============================================================
 # RESPONSE GROUNDING
 # ============================================================
@@ -1721,17 +1743,35 @@ def _chat_planning(
 def chat(mensagem: str, user_id: str) -> str:
     historico = carregar_historico(user_id)
     state = get_session_state(user_id)
+    state_before = state
     session_context = get_session_context(user_id)
     home_action = _home_action(mensagem)
+
+    def _finalizar_resposta(
+        resposta: str,
+        *,
+        route: str,
+        tools_used: list[str] | None = None,
+    ) -> str:
+        salvar_historico(user_id, "user", mensagem)
+        salvar_historico(user_id, "assistant", resposta)
+        _log_turn_summary(
+            user_id=user_id,
+            route=route,
+            state_before=state_before,
+            state_after=get_session_state(user_id),
+            user_message=mensagem,
+            assistant_response=resposta,
+            tools_used=tools_used,
+        )
+        return resposta
 
     if home_action and state == "idle":
         return _handle_home_action(home_action, user_id, mensagem)
 
     resposta_preemptiva = _preempt_safe_operational_intent(mensagem, user_id, state, home_action)
     if resposta_preemptiva is not None:
-        salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", resposta_preemptiva)
-        return resposta_preemptiva
+        return _finalizar_resposta(resposta_preemptiva, route="preempt_safe_intent")
 
     # Acionamento manual do planejamento — só dispara se usuário está idle.
     # Se já está em planning/reviewing_tasks, ignora (não reseta histórico).
@@ -1870,9 +1910,7 @@ def chat(mensagem: str, user_id: str) -> str:
     if session_context.get("last_completed_flow") == "planning" and _is_affirmative(mensagem):
         set_session_state(user_id, "idle")
         resposta = "Fechado."
-        salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", resposta)
-        return resposta
+        return _finalizar_resposta(resposta, route="post_planning_ack")
 
     # Forced routing: conclusão em massa só com período explícito + confirmação.
     if _precisa_concluir_periodo(mensagem):
@@ -1887,22 +1925,16 @@ def chat(mensagem: str, user_id: str) -> str:
             resposta = "De qual período? Hoje, ontem, esta semana ou uma data específica."
         else:
             resposta = _preparar_confirmacao_conclusao_periodo(user_id, periodo)
-        salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", resposta)
-        return resposta
+        return _finalizar_resposta(resposta, route="forced_bulk_complete")
 
     resposta_delete = _preparar_delete_deterministico(user_id, mensagem)
     if resposta_delete:
-        salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", resposta_delete)
-        return resposta_delete
+        return _finalizar_resposta(resposta_delete, route="forced_delete")
 
     if _quer_reagendar_backlog(mensagem):
         resposta = _preparar_reagendamento_backlog(user_id, mensagem)
         if resposta:
-            salvar_historico(user_id, "user", mensagem)
-            salvar_historico(user_id, "assistant", resposta)
-            return resposta
+            return _finalizar_resposta(resposta, route="forced_backlog_reschedule")
 
     pedido_tarefa = _extrair_tarefas_para_salvar(mensagem)
     if pedido_tarefa:
@@ -1914,9 +1946,7 @@ def chat(mensagem: str, user_id: str) -> str:
             due_date,
             _formatar_confirmacao_tarefas_salvas(titles, due_date, resultado),
         )
-        salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", resposta)
-        return resposta
+        return _finalizar_resposta(resposta, route="forced_save_tasks")
 
     # Forced routing: listar tarefas direto do banco
     if _precisa_listar_tarefas(mensagem):
@@ -1926,9 +1956,7 @@ def chat(mensagem: str, user_id: str) -> str:
             "list_tasks", {"filter_date": filter_date} if filter_date else {},
             user_id=user_id,
         )
-        salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", tool_result)
-        return tool_result
+        return _finalizar_resposta(tool_result, route="forced_list_tasks", tools_used=["list_tasks"])
 
     # ========================================
     # Caminho normal: LLM decide se usa tool
@@ -1937,6 +1965,8 @@ def chat(mensagem: str, user_id: str) -> str:
         *historico,
         {"role": "user", "content": mensagem},
     ]
+    route = "llm_direct"
+    tools_usadas: set[str] = set()
 
     try:
         # Primeira chamada — modelo decide usar tool ou responder
@@ -1955,8 +1985,6 @@ def chat(mensagem: str, user_id: str) -> str:
 
             tool_results: list[str] = []
             result_contents: list[dict] = []
-            tools_usadas: set[str] = set()
-
             for block in response.content:
                 if block.type == "tool_use":
                     nome = block.name
@@ -1985,6 +2013,7 @@ def chat(mensagem: str, user_id: str) -> str:
             combined_tool_result = "\n".join(tool_results)
             if tools_usadas & WRITE_TOOLS:
                 resposta = combined_tool_result
+                route = "llm_tool_use"
             else:
                 system2 = system_prompt
                 response2 = anthropic_client.messages.create(
@@ -2002,6 +2031,7 @@ def chat(mensagem: str, user_id: str) -> str:
                         f"Tool: {combined_tool_result[:100]}... | LLM: {resposta[:100]}..."
                     )
                     resposta = _corrigir_resposta_sem_grounding(combined_tool_result, mensagem)
+                route = "llm_tool_use"
 
         # CAMINHO 2 — resposta direta sem tools
         else:
@@ -2016,7 +2046,10 @@ def chat(mensagem: str, user_id: str) -> str:
             f"Tente novamente. ({str(e)})"
         )
 
-    salvar_historico(user_id, "user", mensagem)
-    salvar_historico(user_id, "assistant", resposta)
-
-    return resposta
+    if route == "llm_tool_use":
+        return _finalizar_resposta(
+            resposta,
+            route="llm_tool_use",
+            tools_used=sorted(tools_usadas),
+        )
+    return _finalizar_resposta(resposta, route="llm_direct")
