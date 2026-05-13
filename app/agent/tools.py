@@ -1080,42 +1080,6 @@ TOOLS_SCHEMA: list[dict] = [
         },
     },
     {
-        "name": "delete_task",
-        "description": (
-            "Deleta uma tarefa específica pelo título. "
-            "NUNCA chame esta tool sem antes perguntar ao usuário 'Tem certeza?' e receber confirmação explícita."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Título ou trecho do título da tarefa a ser deletada.",
-                },
-            },
-            "required": ["title"],
-        },
-    },
-    {
-        "name": "delete_all_tasks",
-        "description": (
-            "Deleta em massa tarefas pendentes do usuário. "
-            "NUNCA chame esta tool sem antes perguntar ao usuário 'Tem certeza?' e receber confirmação explícita. "
-            "Suporta filtro por data para deletar apenas tarefas de um dia específico, "
-            "ou sem filtro para deletar todas as tarefas pendentes."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "filter_date": {
-                    "type": "string",
-                    "description": "Deleta apenas tarefas de uma data específica 'YYYY-MM-DD'. Omita para deletar todas as pendentes.",
-                },
-            },
-            "required": [],
-        },
-    },
-    {
         "name": "reschedule_task",
         "description": (
             "Reagenda uma tarefa pendente específica já existente. "

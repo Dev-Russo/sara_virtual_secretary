@@ -44,3 +44,6 @@ PROJETO_SARA.md
 .gsd/
 .agents/
 
+hotfix/*
+!hotfix/
+!hotfix/*.md
