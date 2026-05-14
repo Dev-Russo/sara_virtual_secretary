@@ -41,9 +41,11 @@ from app.agent.tools import (
     complete_tasks_by_ids,
     complete_tasks_in_period,
     buscar_tarefas_pendentes_por_titulo,
+    buscar_tarefas_datadas_por_titulo,
     delete_tasks_by_ids,
     list_reminders,
     list_tasks,
+    move_task_to_backlog,
     resumo_backlog,
     resumo_hoje,
     reschedule_tasks_by_ids,
@@ -160,6 +162,11 @@ ADD_TASK_PATTERNS = [
 RESCHEDULE_BACKLOG_PATTERNS = [
     r"\b(resgata|resgate|resgatar|move|mova|mover|joga|jogue|jogar|passa|passe|passar|reagenda|reagende|reagendar)\b.*\b(hoje|amanh[aã]|\d{1,2}/\d{1,2}(?:/\d{4})?|\d{4}-\d{2}-\d{2})\b",
     r"\b(hoje|amanh[aã]|\d{1,2}/\d{1,2}(?:/\d{4})?|\d{4}-\d{2}-\d{2})\b.*\b(resgata|resgate|resgatar|move|mova|mover|joga|jogue|jogar|passa|passe|passar|reagenda|reagende|reagendar)\b",
+]
+
+MOVE_TO_BACKLOG_PATTERNS = [
+    r"\b(move|mova|mover|joga|jogue|jogar|passa|passe|passar|coloca|coloque|colocar)\b.*\bpara\s+o?\s*backlog\b",
+    r"\bbacklog\b.*\b(move|mova|mover|joga|jogue|jogar|passa|passe|passar|coloca|coloque|colocar)\b",
 ]
 
 DELETE_KEYWORDS = (
@@ -353,6 +360,28 @@ def _extrair_titulo_conclusao(mensagem: str) -> str | None:
     return None
 
 
+def _quer_mover_para_backlog(mensagem: str) -> bool:
+    msg = _normalizar(mensagem)
+    return any(re.search(pattern, msg) for pattern in MOVE_TO_BACKLOG_PATTERNS)
+
+
+def _extrair_titulo_mover_para_backlog(mensagem: str) -> str | None:
+    padroes = [
+        r"^(?:consegue\s+)?(?:move|mova|mover|joga|jogue|jogar|passa|passe|passar|coloca|coloque|colocar)\s+(?P<title>.+?)\s+para\s+o?\s*backlog\??$",
+        r"^(?P<title>.+?)\s+para\s+o?\s*backlog\??$",
+    ]
+    texto = mensagem.strip().strip(".")
+    for pattern in padroes:
+        match = re.search(pattern, texto, flags=re.IGNORECASE)
+        if not match:
+            continue
+        title = match.group("title").strip(" .")
+        title = re.sub(r"\b(por favor|pra mim|para mim|por gentileza|consegue)\b", "", title, flags=re.IGNORECASE).strip(" .")
+        title = re.sub(r"\s+", " ", title).strip()
+        return title or None
+    return None
+
+
 def _preparar_conclusao_individual(user_id: str, mensagem: str) -> str | None:
     if not _eh_pedido_conclusao_individual(mensagem):
         return None
@@ -385,6 +414,39 @@ def _preparar_conclusao_individual(user_id: str, mensagem: str) -> str | None:
     )
     return (
         f"Encontrei mais de uma tarefa para concluir com '{titulo}':\n\n"
+        f"{linhas}\n\n"
+        "Me fala qual delas pelo número ou por um nome mais específico."
+    )
+
+
+def _preparar_mover_para_backlog(user_id: str, mensagem: str) -> str | None:
+    if not _quer_mover_para_backlog(mensagem):
+        return None
+
+    titulo = _extrair_titulo_mover_para_backlog(mensagem)
+    if not titulo:
+        return "Me diz qual tarefa você quer passar para o backlog."
+
+    tarefas = buscar_tarefas_datadas_por_titulo(user_id, titulo)
+    if not tarefas:
+        return "Não achei tarefa pendente com data para mover para o backlog."
+
+    if len(tarefas) == 1:
+        return move_task_to_backlog(str(tarefas[0].id), user_id)
+
+    tarefas_serializadas = _serializar_tarefas_revisao(tarefas)
+    linhas = "\n".join(f"{idx}. {task['title']}" for idx, task in enumerate(tarefas_serializadas, start=1))
+    set_session_state(
+        user_id,
+        "confirming_move_to_backlog",
+        context={
+            "move_to_backlog_title": titulo,
+            "move_to_backlog_tasks": tarefas_serializadas,
+        },
+        replace_context=True,
+    )
+    return (
+        f"Encontrei mais de uma tarefa para mover para o backlog com '{titulo}':\n\n"
         f"{linhas}\n\n"
         "Me fala qual delas pelo número ou por um nome mais específico."
     )
@@ -567,6 +629,30 @@ def _tratar_confirmacao_conclusao_individual(user_id: str, mensagem: str, contex
         return f"Ainda ficou ambíguo. Escolhe só uma tarefa:\n\n{linhas}"
 
     resultado = complete_task_by_id(selecionadas[0], user_id)
+    set_session_state(user_id, "idle")
+    return resultado
+
+
+def _tratar_confirmacao_mover_para_backlog(user_id: str, mensagem: str, contexto: dict) -> str:
+    if _quer_sair_planejamento(mensagem) or re.search(r"\b(n[aã]o|cancela|deixa)\b", _normalizar(mensagem)):
+        set_session_state(user_id, "idle")
+        return "Beleza, não movi nada para o backlog."
+
+    tarefas = contexto.get("move_to_backlog_tasks", [])
+    if not tarefas:
+        set_session_state(user_id, "idle")
+        return "Perdi o contexto da tarefa. Me pede de novo que eu tento."
+
+    selecionadas = _selecionar_tarefas_reagendamento_backlog(mensagem, tarefas)
+    if not selecionadas:
+        return "Me diz qual tarefa você quer mover para o backlog: número ou um nome mais específico."
+
+    if len(selecionadas) > 1:
+        escolhidas = [task for task in tarefas if task["task_id"] in selecionadas]
+        linhas = "\n".join(f"{idx + 1}. {task['title']}" for idx, task in enumerate(escolhidas))
+        return f"Ainda ficou ambíguo. Escolhe só uma tarefa:\n\n{linhas}"
+
+    resultado = move_task_to_backlog(selecionadas[0], user_id)
     set_session_state(user_id, "idle")
     return resultado
 
@@ -2033,6 +2119,9 @@ def chat(mensagem: str, user_id: str) -> str:
     if state == "confirming_single_complete":
         return _tratar_confirmacao_conclusao_individual(user_id, mensagem, session_context)
 
+    if state == "confirming_move_to_backlog":
+        return _tratar_confirmacao_mover_para_backlog(user_id, mensagem, session_context)
+
     if state == "confirming_bulk_complete":
         return _tratar_confirmacao_conclusao_periodo(user_id, mensagem, session_context)
 
@@ -2107,6 +2196,10 @@ def chat(mensagem: str, user_id: str) -> str:
     resposta_conclusao = _preparar_conclusao_individual(user_id, mensagem)
     if resposta_conclusao:
         return _finalizar_resposta(resposta_conclusao, route="forced_complete_task")
+
+    resposta_move_backlog = _preparar_mover_para_backlog(user_id, mensagem)
+    if resposta_move_backlog:
+        return _finalizar_resposta(resposta_move_backlog, route="forced_move_to_backlog")
 
     resposta_delete = _preparar_delete_deterministico(user_id, mensagem)
     if resposta_delete:

@@ -457,8 +457,34 @@ def test_reagendar_backlog_deterministico():
     _cleanup()
 
 
+def test_mover_tarefa_para_backlog_deterministico():
+    print("\n[14] Mover tarefa datada para backlog")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    task_id = _create_task("Correções no TCC", due_date=hoje)
+
+    resposta = chat("Passe correções no TCC para o backlog", user_id=TEST_USER)
+    resposta_hoje = chat("Hoje", user_id=TEST_USER)
+    resposta_backlog = chat("Backlog", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefa = db.query(Task).filter(Task.id == task_id).first()
+    db.close()
+
+    check("confirmou movimento para backlog", "movida para o backlog" in resposta.lower(), f"resposta: {resposta}")
+    check("removeu due_date", tarefa is not None and tarefa.due_date is None, f"due_date: {tarefa.due_date if tarefa else 'não encontrada'}")
+    check("classificou como backlog", tarefa is not None and tarefa.category == "backlog", f"category: {tarefa.category if tarefa else 'não encontrada'}")
+    secao_hoje = resposta_hoje.split("Backlog:")[0]
+    check("sumiu da seção de hoje", "Correções no TCC" not in secao_hoje, f"resposta_hoje: {resposta_hoje}")
+    check("apareceu no backlog", "Correções no TCC" in resposta_backlog, f"resposta_backlog: {resposta_backlog}")
+
+    _cleanup()
+
+
 def test_tools_destrutivas_fora_do_schema_geral():
-    print("\n[14] Tools destrutivas fora do schema geral do LLM")
+    print("\n[15] Tools destrutivas fora do schema geral do LLM")
 
     tool_names = {tool["name"] for tool in TOOLS_SCHEMA}
 
@@ -1045,6 +1071,7 @@ async def main():
         await test_fluxo_revisao_em_lote()
         await test_revisao_check()
         test_reagendar_backlog_deterministico()
+        test_mover_tarefa_para_backlog_deterministico()
         test_tools_destrutivas_fora_do_schema_geral()
         test_prompt_bloqueia_delecao_no_fluxo_livre()
         test_delete_deterministico_por_titulo()

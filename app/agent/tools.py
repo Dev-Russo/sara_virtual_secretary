@@ -151,6 +151,15 @@ def buscar_tarefas_pendentes_por_titulo(user_id: str, title: str) -> list[Task]:
         db.close()
 
 
+def buscar_tarefas_datadas_por_titulo(user_id: str, title: str) -> list[Task]:
+    db = SessionLocal()
+    try:
+        tarefas = _buscar_tarefas_por_titulo(db, user_id, title)
+        return [task for task in tarefas if task.due_date is not None]
+    finally:
+        db.close()
+
+
 def _mensagem_ambiguidade_tarefas(title: str, tarefas: list[Task], acao: str) -> str:
     linhas = "\n".join(f"{idx}. {task.title}" for idx, task in enumerate(tarefas, start=1))
     return (
@@ -1092,6 +1101,39 @@ def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
         db.rollback()
         logger.error(f"[reschedule_task] {e}")
         return f"Erro ao reagendar tarefa: {str(e)}"
+    finally:
+        db.close()
+
+
+def move_task_to_backlog(task_id: str, user_id: str) -> str:
+    db = SessionLocal()
+    try:
+        task = db.query(Task).filter(
+            Task.id == uuid.UUID(task_id),
+            Task.user_id == user_id,
+            Task.status == "pending",
+        ).first()
+
+        if not task:
+            return "Nenhuma tarefa pendente encontrada para mover para o backlog."
+
+        task.due_date = None
+        atualizar_categoria_tarefa(task)
+        task.updated_at = datetime.now(TIMEZONE)
+        db.commit()
+        db.refresh(task)
+
+        if task.status != "pending" or task.due_date is not None or task.category != "backlog":
+            return (
+                f"Tentei mover '{task.title}' para o backlog, mas não consegui validar a mudança no sistema. "
+                "Me pede para listar o backlog ou as tarefas de hoje que eu te mostro o estado real."
+            )
+
+        return f"Tarefa '{task.title}' movida para o backlog."
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[move_task_to_backlog] {e}")
+        return f"Erro ao mover tarefa para o backlog: {str(e)}"
     finally:
         db.close()
 
