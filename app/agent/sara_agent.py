@@ -31,6 +31,13 @@ from datetime import datetime, timedelta, date, timezone
 import pytz
 import anthropic
 
+from app.agent.contracts import (
+    PERIOD_LAST_WEEK,
+    PERIOD_OVERDUE,
+    PERIOD_THIS_WEEK,
+    PERIOD_TODAY,
+    PERIOD_YESTERDAY,
+)
 from app.agent.tools import (
     TOOLS_MAP,
     TOOLS_SCHEMA,
@@ -226,7 +233,7 @@ def _quer_iniciar_check(mensagem: str) -> bool:
 def _home_action(mensagem: str) -> str | None:
     msg = mensagem.strip().lower()
     mapping = {
-        HOME_BUTTON_HOJE.lower(): "today",
+        HOME_BUTTON_HOJE.lower(): PERIOD_TODAY,
         HOME_BUTTON_PLANEJAR.lower(): "planning",
         HOME_BUTTON_REVISAR.lower(): "review",
         HOME_BUTTON_BACKLOG.lower(): "backlog",
@@ -329,15 +336,15 @@ def _detectar_periodo_conclusao(mensagem: str) -> dict | None:
         backlog_mode = "all" if re.search(r"\b(todas|todos|tudo)\b", msg_norm) else "select"
         return {"backlog_only": True, "backlog_mode": backlog_mode}
     if re.search(r"\bsemana\s+passada\b", msg_lower):
-        return {"period": "last_week"}
+        return {"period": PERIOD_LAST_WEEK}
     if re.search(r"\b(essa|esta)\s+semana\b|\bda\s+semana\b", msg_lower):
-        return {"period": "this_week"}
+        return {"period": PERIOD_THIS_WEEK}
     if re.search(r"\b(atrasad[ao]s?|vencid[ao]s?)\b", msg_lower):
-        return {"period": "overdue"}
+        return {"period": PERIOD_OVERDUE}
     if re.search(r"\bhoje\b", msg_lower):
-        return {"period": "today"}
+        return {"period": PERIOD_TODAY}
     if re.search(r"\bontem\b", msg_lower):
-        return {"period": "yesterday"}
+        return {"period": PERIOD_YESTERDAY}
 
     data = _parse_data_explicita(mensagem)
     if data:
@@ -575,7 +582,7 @@ def _preempt_safe_operational_intent(
     if not _estado_conversacional_ativo(state):
         return None
 
-    if home_action in {"home", "today", "backlog", "reminders"}:
+    if home_action in {"home", PERIOD_TODAY, "backlog", "reminders"}:
         logger.info(f"[Forced routing] Preempção de home action '{home_action}' saindo de {state} para {user_id}")
         set_session_state(user_id, "idle")
         return _handle_home_action(home_action, user_id, mensagem)
@@ -1388,7 +1395,7 @@ def _handle_home_action(action: str, user_id: str, mensagem: str) -> str:
         set_session_state(user_id, "idle")
         return mensagem_home()
 
-    if action == "today":
+    if action == PERIOD_TODAY:
         set_session_state(user_id, "idle")
         return resumo_hoje(user_id)
 

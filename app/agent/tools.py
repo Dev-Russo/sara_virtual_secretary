@@ -18,6 +18,14 @@ import uuid
 
 import pytz
 
+from app.agent.contracts import (
+    PERIOD_LAST_WEEK,
+    PERIOD_OVERDUE,
+    PERIOD_THIS_WEEK,
+    PERIOD_TODAY,
+    PERIOD_YESTERDAY,
+    VALID_BULK_COMPLETE_PERIODS,
+)
 from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.reminder import Reminder
@@ -203,18 +211,18 @@ def _periodo_para_intervalo(
         label = start_date if start_date == (end_date or start_date) else f"{start_date} a {end_date}"
         return label, inicio, fim
 
-    if period_norm == "today":
+    if period_norm == PERIOD_TODAY:
         inicio, fim = intervalo_dia_logico()
         return "hoje", inicio, fim
-    if period_norm == "yesterday":
+    if period_norm == PERIOD_YESTERDAY:
         inicio, fim = _intervalo_data_local(hoje - timedelta(days=1))
         return "ontem", inicio, fim
-    if period_norm == "this_week":
+    if period_norm == PERIOD_THIS_WEEK:
         segunda = hoje - timedelta(days=hoje.weekday())
         inicio, _ = _intervalo_data_local(segunda)
         _, fim = _intervalo_data_local(segunda + timedelta(days=6))
         return "esta semana", inicio, fim
-    if period_norm == "last_week":
+    if period_norm == PERIOD_LAST_WEEK:
         segunda = hoje - timedelta(days=hoje.weekday() + 7)
         inicio, _ = _intervalo_data_local(segunda)
         _, fim = _intervalo_data_local(segunda + timedelta(days=6))
@@ -251,7 +259,7 @@ def tarefas_pendentes_no_periodo(
     end_date: str | None = None,
     include_backlog: bool = False,
 ) -> tuple[str, list[Task]]:
-    if (period or "").strip().lower() == "overdue":
+    if (period or "").strip().lower() == PERIOD_OVERDUE:
         return "atrasadas", tarefas_atrasadas_pendentes(user_id)
 
     intervalo = _periodo_para_intervalo(period, start_date, end_date)
@@ -499,7 +507,7 @@ def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
         backlog_only = bool(argumentos.get("backlog_only"))
         if not period and not start_date and not backlog_only:
             return "Erro: informe o período antes de concluir em massa. Use today, yesterday, this_week, last_week, overdue, backlog ou start_date."
-        if period and period not in ("today", "yesterday", "this_week", "last_week", "overdue"):
+        if period and period not in VALID_BULK_COMPLETE_PERIODS:
             return "Erro: período inválido. Use today, yesterday, this_week, last_week ou overdue."
         for field_name, value in (("start_date", start_date), ("end_date", end_date)):
             if value:
@@ -747,7 +755,7 @@ def complete_tasks_in_period(
     db = SessionLocal()
     try:
         period_norm = (period or "").strip().lower()
-        if period_norm == "overdue":
+        if period_norm == PERIOD_OVERDUE:
             inicio, _ = intervalo_dia_logico()
             tasks = (
                 db.query(Task)
