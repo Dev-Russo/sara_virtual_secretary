@@ -170,6 +170,20 @@ def _intervalo_data_local(valor: date) -> tuple[datetime, datetime]:
     return inicio, fim
 
 
+def _parse_due_date_tarefa(valor: str | None) -> tuple[datetime | None, bool]:
+    texto = str(valor or "").strip()
+    if not texto:
+        return None, False
+
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(texto, fmt)
+            return TIMEZONE.localize(parsed), fmt == "%Y-%m-%d"
+        except ValueError:
+            continue
+    raise ValueError("invalid_due_date")
+
+
 def _periodo_para_intervalo(
     period: str | None = None,
     start_date: str | None = None,
@@ -438,17 +452,17 @@ def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
 
         due_date = argumentos.get("due_date")
         if due_date:
-            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
-                try:
-                    parsed = datetime.strptime(str(due_date).strip(), fmt)
-                    tz_aware = TIMEZONE.localize(parsed)
-                    if tz_aware <= datetime.now(TIMEZONE):
-                        return "Erro: a data da tarefa já passou. Forneça uma data futura."
-                    break
-                except ValueError:
-                    continue
-            else:
+            try:
+                parsed_date, date_only = _parse_due_date_tarefa(due_date)
+            except ValueError:
                 return "Erro: formato de data inválido. Use 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM'."
+            if parsed_date is None:
+                return None
+            if date_only:
+                if parsed_date.astimezone(TIMEZONE).date() < hoje_logico():
+                    return "Erro: a data da tarefa já passou. Forneça uma data futura."
+            elif parsed_date <= datetime.now(TIMEZONE):
+                return "Erro: a data da tarefa já passou. Forneça uma data futura."
 
     elif tool_name == "create_reminder":
         message = argumentos.get("message", "")
@@ -528,12 +542,10 @@ def save_task(title: str, user_id: str, due_date: str = None, priority: str = "m
     try:
         parsed_date = None
         if due_date and isinstance(due_date, str) and due_date.strip():
-            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
-                try:
-                    parsed_date = TIMEZONE.localize(datetime.strptime(due_date.strip(), fmt))
-                    break
-                except ValueError:
-                    continue
+            try:
+                parsed_date, _ = _parse_due_date_tarefa(due_date)
+            except ValueError:
+                parsed_date = None
 
         existente = _buscar_tarefa_duplicada(db, user_id, title.strip(), parsed_date)
         if existente:
@@ -1100,14 +1112,10 @@ def finalizar_planejamento(user_id: str, tarefas: list = None) -> str:
             due_date_str = t.get("due_date")
             parsed_date = None
             if due_date_str and isinstance(due_date_str, str) and due_date_str.strip():
-                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
-                    try:
-                        parsed_date = TIMEZONE.localize(
-                            datetime.strptime(due_date_str.strip(), fmt)
-                        )
-                        break
-                    except ValueError:
-                        continue
+                try:
+                    parsed_date, _ = _parse_due_date_tarefa(due_date_str)
+                except ValueError:
+                    parsed_date = None
 
             existente = _buscar_tarefa_duplicada(db, user_id, title, parsed_date)
             if existente:

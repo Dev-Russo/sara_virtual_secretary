@@ -56,7 +56,7 @@ from app.agent.sara_agent import (
     finalizar_revisao,
     salvar_historico,
 )
-from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA, list_tasks
+from app.agent.tools import TOOLS_MAP, TOOLS_SCHEMA, list_tasks, save_task, finalizar_planejamento, hoje_logico
 import app.scheduler.jobs as jobs
 from app.agent import sara_agent as sara_agent_module
 from app.scheduler.jobs import iniciar_planejamento_manual, buscar_tarefas_hoje, abrir_fluxo_pos_revisao, iniciar_revisao_check
@@ -920,6 +920,48 @@ def test_historico_ignora_registros_sem_created_at():
     _cleanup()
 
 
+def test_save_task_hoje_sem_horario_aceita_dia_inteiro():
+    print("\n[31] save_task aceita hoje sem horário como dia inteiro")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    due_date = hoje_logico().strftime("%Y-%m-%d")
+    resposta = save_task("Meta de passos", TEST_USER, due_date=due_date)
+
+    db = SessionLocal()
+    tarefa = db.query(Task).filter(Task.user_id == TEST_USER, Task.title == "Meta de passos").first()
+    db.close()
+
+    check("não rejeitou hoje sem horário", "já passou" not in resposta.lower() and "salva com sucesso" in resposta.lower(), f"resposta: {resposta}")
+    check("persistiu tarefa", tarefa is not None, f"tarefa: {tarefa}")
+    check("salvou como dia inteiro em meia-noite local", tarefa is not None and tarefa.due_date is not None and tarefa.due_date.astimezone(TIMEZONE).hour == 0 and tarefa.due_date.astimezone(TIMEZONE).minute == 0, f"due_date: {tarefa.due_date if tarefa else 'não encontrada'}")
+    check("classificou como today", tarefa is not None and tarefa.category == "today", f"categoria: {tarefa.category if tarefa else 'não encontrada'}")
+
+    _cleanup()
+
+
+def test_finalizar_planejamento_aceita_data_sem_horario():
+    print("\n[32] finalizar_planejamento aceita data sem horário")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    due_date = hoje_logico().strftime("%Y-%m-%d")
+    resposta = finalizar_planejamento(
+        TEST_USER,
+        tarefas=[{"title": "Meta do planejamento", "due_date": due_date}],
+    )
+
+    db = SessionLocal()
+    tarefa = db.query(Task).filter(Task.user_id == TEST_USER, Task.title == "Meta do planejamento").first()
+    db.close()
+
+    check("fechou o planejamento com sucesso", "Fechei seu plano" in resposta, f"resposta: {resposta}")
+    check("persistiu tarefa do planejamento", tarefa is not None, f"tarefa: {tarefa}")
+    check("salvou data sem horário como dia inteiro", tarefa is not None and tarefa.due_date is not None and tarefa.due_date.astimezone(TIMEZONE).hour == 0 and tarefa.due_date.astimezone(TIMEZONE).minute == 0, f"due_date: {tarefa.due_date if tarefa else 'não encontrada'}")
+
+    _cleanup()
+
+
 # ─── Runner ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -958,6 +1000,8 @@ async def main():
         test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje()
         test_conclusao_em_massa_reconhece_atrasadas()
         test_historico_ignora_registros_sem_created_at()
+        test_save_task_hoje_sem_horario_aceita_dia_inteiro()
+        test_finalizar_planejamento_aceita_data_sem_horario()
     finally:
         _cleanup()
 
