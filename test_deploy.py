@@ -920,8 +920,23 @@ def test_historico_ignora_registros_sem_created_at():
     _cleanup()
 
 
+def test_inconsistencia_operacional_entra_em_modo_diagnostico():
+    print("\n[31] Inconsistência operacional entra em modo diagnóstico")
+    _reset_capture()
+    _cleanup()
+
+    salvar_historico(TEST_USER, "assistant", "Tarefa 'Alongamento' marcada como concluída! ✅")
+    resposta = chat("Por que ainda está aparecendo se me disse que está concluída?", user_id=TEST_USER)
+
+    check("reconheceu a inconsistência", "inconsistência" in resposta.lower(), f"resposta: {resposta}")
+    check("não voltou para listagem bruta", "Seu panorama agora tá assim" not in resposta, f"resposta: {resposta}")
+    check("entrou em modo diagnóstico", "não vou assumir sucesso" in resposta.lower(), f"resposta: {resposta}")
+
+    _cleanup()
+
+
 def test_save_task_hoje_sem_horario_aceita_dia_inteiro():
-    print("\n[31] save_task aceita hoje sem horário como dia inteiro")
+    print("\n[32] save_task aceita hoje sem horário como dia inteiro")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -941,7 +956,7 @@ def test_save_task_hoje_sem_horario_aceita_dia_inteiro():
 
 
 def test_finalizar_planejamento_aceita_data_sem_horario():
-    print("\n[32] finalizar_planejamento aceita data sem horário")
+    print("\n[33] finalizar_planejamento aceita data sem horário")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -1000,6 +1015,7 @@ async def main():
         test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje()
         test_conclusao_em_massa_reconhece_atrasadas()
         test_historico_ignora_registros_sem_created_at()
+        test_inconsistencia_operacional_entra_em_modo_diagnostico()
         test_save_task_hoje_sem_horario_aceita_dia_inteiro()
         test_finalizar_planejamento_aceita_data_sem_horario()
     finally:

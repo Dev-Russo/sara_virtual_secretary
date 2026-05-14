@@ -534,6 +534,25 @@ def _resposta_operacional_sem_execucao(mensagem: str) -> str:
     )
 
 
+def _eh_alerta_inconsistencia_operacional(mensagem: str) -> bool:
+    msg_norm = _normalizar(mensagem)
+    padroes = [
+        r"\bpor que\b.*\b(ainda|continua)\b.*\b(aparec|volt)\w*",
+        r"\bvoce\b.*\bdisse\b.*\bconclu\w*",
+        r"\bnao funcionou\b|\bnão funcionou\b",
+        r"\bcontinua aparecendo\b",
+    ]
+    return any(re.search(pattern, msg_norm) for pattern in padroes)
+
+
+def _resposta_diagnostico_inconsistencia() -> str:
+    return (
+        "Você tem razão em apontar a inconsistência. "
+        "Eu não vou assumir sucesso nessa situação. "
+        "Posso listar o estado atual das tarefas ou você pode me dizer o item exato para eu validar pelo nome ou ID."
+    )
+
+
 def _estado_conversacional_ativo(state: str) -> bool:
     return state in {
         "planning",
@@ -1831,6 +1850,10 @@ def chat(mensagem: str, user_id: str) -> str:
     resposta_preemptiva = _preempt_safe_operational_intent(mensagem, user_id, state, home_action)
     if resposta_preemptiva is not None:
         return _finalizar_resposta(resposta_preemptiva, route="preempt_safe_intent")
+
+    if _eh_alerta_inconsistencia_operacional(mensagem):
+        set_session_state(user_id, "idle")
+        return _finalizar_resposta(_resposta_diagnostico_inconsistencia(), route="operational_inconsistency")
 
     # Acionamento manual do planejamento — só dispara se usuário está idle.
     # Se já está em planning/reviewing_tasks, ignora (não reseta histórico).
