@@ -152,6 +152,18 @@ def _mensagem_ambiguidade_tarefas(title: str, tarefas: list[Task], acao: str) ->
     )
 
 
+def _conclusao_persistida(db, task_id: uuid.UUID, user_id: str) -> bool:
+    tarefa = (
+        db.query(Task)
+        .filter(
+            Task.id == task_id,
+            Task.user_id == user_id,
+        )
+        .first()
+    )
+    return tarefa is not None and tarefa.status == "done"
+
+
 def _intervalo_data_local(valor: date) -> tuple[datetime, datetime]:
     inicio = TIMEZONE.localize(datetime.combine(valor, datetime.min.time()))
     fim = TIMEZONE.localize(datetime.combine(valor, datetime.max.time().replace(microsecond=0)))
@@ -846,6 +858,13 @@ def complete_task(title: str, user_id: str) -> str:
         task.category = None
         task.updated_at = datetime.now(TIMEZONE)
         db.commit()
+        db.refresh(task)
+
+        if not _conclusao_persistida(db, task.id, user_id):
+            return (
+                f"Tentei concluir '{task.title}', mas não consegui validar a mudança no sistema. "
+                "Me pede para listar as pendentes ou tenta concluir pelo item exato."
+            )
 
         return f"Tarefa '{task.title}' marcada como concluída! ✅"
 
@@ -873,6 +892,13 @@ def complete_task_by_id(task_id: str, user_id: str) -> str:
         task.category = None
         task.updated_at = datetime.now(TIMEZONE)
         db.commit()
+
+        if not _conclusao_persistida(db, task.id, user_id):
+            return (
+                f"Tentei concluir '{task.title}', mas não consegui validar a mudança no sistema. "
+                "Me pede para revisar os itens abertos que eu te mostro o estado real."
+            )
+
         return f"Tarefa '{task.title}' marcada como concluída! ✅"
     except Exception as e:
         db.rollback()
