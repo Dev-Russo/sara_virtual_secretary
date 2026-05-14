@@ -45,6 +45,7 @@ from app.agent.tools import (
     _validar_argumentos,
     TIMEZONE,
     complete_task_by_id,
+    complete_task_by_id_result,
     complete_tasks_by_ids,
     complete_tasks_in_period,
     delete_tasks_by_ids,
@@ -1247,8 +1248,8 @@ def _aplicar_revisao(user_id: str, contexto: dict) -> str:
     falhas: list[str] = []
 
     for task_id in done_ids:
-        resultado = complete_task_by_id(task_id, user_id)
-        if "marcada como concluída" in resultado.lower():
+        resultado = complete_task_by_id_result(task_id, user_id)
+        if resultado["status"] == "success":
             if task_id in task_map:
                 done_confirmadas.append(task_map[task_id]["title"])
         elif task_id in task_map:

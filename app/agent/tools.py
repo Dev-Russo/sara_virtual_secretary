@@ -14,6 +14,7 @@ import logging
 import re
 import unicodedata
 from datetime import datetime, timedelta, date
+from typing import TypedDict
 import uuid
 
 import pytz
@@ -50,6 +51,14 @@ CATEGORY_LABELS = {
 }
 MAX_TITLE_LENGTH = 500
 MAX_MESSAGE_LENGTH = 1000
+
+
+class TaskWriteResult(TypedDict):
+    status: str
+    message: str
+    task_id: str | None
+    task_title: str | None
+    reason: str | None
 
 
 def hoje_logico(agora: datetime | None = None) -> date:
@@ -170,6 +179,50 @@ def _conclusao_persistida(db, task_id: uuid.UUID, user_id: str) -> bool:
         .first()
     )
     return tarefa is not None and tarefa.status == "done"
+
+
+def _task_write_result(
+    *,
+    status: str,
+    message: str,
+    task_id: uuid.UUID | str | None = None,
+    task_title: str | None = None,
+    reason: str | None = None,
+) -> TaskWriteResult:
+    return {
+        "status": status,
+        "message": message,
+        "task_id": str(task_id) if task_id is not None else None,
+        "task_title": task_title,
+        "reason": reason,
+    }
+
+
+def _complete_task_record(task: Task, db, user_id: str, *, validation_hint: str) -> TaskWriteResult:
+    task.status = "done"
+    task.category = None
+    task.updated_at = datetime.now(TIMEZONE)
+    db.commit()
+    db.refresh(task)
+
+    if not _conclusao_persistida(db, task.id, user_id):
+        return _task_write_result(
+            status="not_confirmed",
+            task_id=task.id,
+            task_title=task.title,
+            reason="post_validation_failed",
+            message=(
+                f"Tentei concluir '{task.title}', mas não consegui validar a mudança no sistema. "
+                f"{validation_hint}"
+            ),
+        )
+
+    return _task_write_result(
+        status="success",
+        task_id=task.id,
+        task_title=task.title,
+        message=f"Tarefa '{task.title}' marcada como concluída! ✅",
+    )
 
 
 def _intervalo_data_local(valor: date) -> tuple[datetime, datetime]:
@@ -873,20 +926,12 @@ def complete_task(title: str, user_id: str) -> str:
             return _mensagem_ambiguidade_tarefas(title, tarefas, "concluir")
 
         task = tarefas[0]
-
-        task.status = "done"
-        task.category = None
-        task.updated_at = datetime.now(TIMEZONE)
-        db.commit()
-        db.refresh(task)
-
-        if not _conclusao_persistida(db, task.id, user_id):
-            return (
-                f"Tentei concluir '{task.title}', mas não consegui validar a mudança no sistema. "
-                "Me pede para listar as pendentes ou tenta concluir pelo item exato."
-            )
-
-        return f"Tarefa '{task.title}' marcada como concluída! ✅"
+        return _complete_task_record(
+            task,
+            db,
+            user_id,
+            validation_hint="Me pede para listar as pendentes ou tenta concluir pelo item exato.",
+        )["message"]
 
     except Exception as e:
         db.rollback()
@@ -897,6 +942,10 @@ def complete_task(title: str, user_id: str) -> str:
 
 
 def complete_task_by_id(task_id: str, user_id: str) -> str:
+    return complete_task_by_id_result(task_id, user_id)["message"]
+
+
+def complete_task_by_id_result(task_id: str, user_id: str) -> TaskWriteResult:
     db = SessionLocal()
     try:
         task = db.query(Task).filter(
@@ -906,24 +955,28 @@ def complete_task_by_id(task_id: str, user_id: str) -> str:
         ).first()
 
         if not task:
-            return "Nenhuma tarefa pendente encontrada para concluir."
-
-        task.status = "done"
-        task.category = None
-        task.updated_at = datetime.now(TIMEZONE)
-        db.commit()
-
-        if not _conclusao_persistida(db, task.id, user_id):
-            return (
-                f"Tentei concluir '{task.title}', mas não consegui validar a mudança no sistema. "
-                "Me pede para revisar os itens abertos que eu te mostro o estado real."
+            return _task_write_result(
+                status="not_found",
+                task_id=task_id,
+                reason="task_not_found",
+                message="Nenhuma tarefa pendente encontrada para concluir.",
             )
 
-        return f"Tarefa '{task.title}' marcada como concluída! ✅"
+        return _complete_task_record(
+            task,
+            db,
+            user_id,
+            validation_hint="Me pede para revisar os itens abertos que eu te mostro o estado real.",
+        )
     except Exception as e:
         db.rollback()
         logger.error(f"[complete_task_by_id] {e}")
-        return f"Erro ao concluir tarefa: {str(e)}"
+        return _task_write_result(
+            status="error",
+            task_id=task_id,
+            reason="exception",
+            message=f"Erro ao concluir tarefa: {str(e)}",
+        )
     finally:
         db.close()
 
