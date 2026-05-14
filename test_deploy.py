@@ -713,8 +713,27 @@ def test_write_tool_ignora_confirmacao_falsa_do_llm():
     _cleanup()
 
 
+def test_llm_direct_nao_confirma_conclusao_sem_tool():
+    print("\n[23] LLM direct não confirma conclusão sem tool")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    fake_direct_response = SimpleNamespace(
+        stop_reason="end_turn",
+        content=[SimpleNamespace(type="text", text="Fechado.")],
+    )
+
+    with _mock_anthropic_responses([fake_direct_response]):
+        resposta = chat("Pode considerar alongamento como concluído por favor", user_id=TEST_USER)
+
+    check("não confirmou sucesso textual", "Fechado." not in resposta, f"resposta: {resposta}")
+    check("entrou em resposta segura", "não consegui validar" in resposta.lower(), f"resposta: {resposta}")
+
+    _cleanup()
+
+
 def test_revisao_confirma_so_o_que_persistiu():
-    print("\n[23] Revisão confirma só o que persistiu")
+    print("\n[24] Revisão confirma só o que persistiu")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -749,7 +768,7 @@ def test_revisao_confirma_so_o_que_persistiu():
 
 
 def test_complete_task_ambiguo_nao_muta():
-    print("\n[24] complete_task ambíguo não muta")
+    print("\n[25] complete_task ambíguo não muta")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -770,7 +789,7 @@ def test_complete_task_ambiguo_nao_muta():
 
 
 def test_delete_ambiguo_pede_selecao():
-    print("\n[25] Delete ambíguo pede seleção antes de confirmar")
+    print("\n[26] Delete ambíguo pede seleção antes de confirmar")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -795,7 +814,7 @@ def test_delete_ambiguo_pede_selecao():
 
 
 def test_listagem_ignora_categoria_persistida_stale():
-    print("\n[26] Listagem ignora categoria persistida stale")
+    print("\n[27] Listagem ignora categoria persistida stale")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -822,7 +841,7 @@ def test_listagem_ignora_categoria_persistida_stale():
 
 
 def test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje():
-    print("\n[27] Conclusão em massa reconhece frase com minhas atividades de hoje")
+    print("\n[28] Conclusão em massa reconhece frase com minhas atividades de hoje")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -839,7 +858,7 @@ def test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje():
 
 
 def test_historico_ignora_registros_sem_created_at():
-    print("\n[28] Histórico ignora registros sem created_at")
+    print("\n[29] Histórico ignora registros sem created_at")
     _reset_capture()
     _cleanup()
 
@@ -902,6 +921,7 @@ async def main():
         test_conclusao_em_massa_do_backlog_sem_pedir_data()
         test_conclusao_parcial_do_backlog_com_selecao()
         test_write_tool_ignora_confirmacao_falsa_do_llm()
+        test_llm_direct_nao_confirma_conclusao_sem_tool()
         test_revisao_confirma_so_o_que_persistiu()
         test_complete_task_ambiguo_nao_muta()
         test_delete_ambiguo_pede_selecao()

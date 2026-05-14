@@ -480,6 +480,53 @@ def _precisa_listar_tarefas(mensagem: str) -> bool:
     return False
 
 
+def _eh_intencao_operacional_de_escrita(mensagem: str) -> bool:
+    msg_norm = _normalizar(mensagem)
+
+    if _extrair_tarefas_para_salvar(mensagem):
+        return True
+    if _eh_pedido_delete(mensagem):
+        return True
+    if _quer_reagendar_backlog(mensagem):
+        return True
+    if _precisa_concluir_periodo(mensagem):
+        return True
+
+    padroes = [
+        r"\b(considere|considera|considerar|marque|marca|marcar|conclui|concluir|conclua|complete|completar|finaliza|finalizar)\b.*\b(conclu\w*|feito|feita)\b",
+        r"\b(ja|já)\s+(fiz|terminei|conclui)\b",
+        r"\b(acabei|terminei)\s+de\b",
+    ]
+    return any(re.search(pattern, msg_norm) for pattern in padroes)
+
+
+def _resposta_operacional_sem_execucao(mensagem: str) -> str:
+    if _precisa_concluir_periodo(mensagem):
+        return (
+            "Não consegui validar a conclusão no sistema ainda. "
+            "Posso listar as tarefas do período correto ou você pode me dizer exatamente qual item quer concluir."
+        )
+    if _eh_pedido_delete(mensagem):
+        return (
+            "Não consegui validar nenhuma remoção no sistema ainda. "
+            "Se quiser, eu preparo a confirmação certa antes de apagar qualquer coisa."
+        )
+    if _quer_reagendar_backlog(mensagem):
+        return (
+            "Não consegui confirmar nenhum reagendamento no sistema ainda. "
+            "Posso listar o backlog e preparar a seleção correta."
+        )
+    if _extrair_tarefas_para_salvar(mensagem):
+        return (
+            "Não consegui confirmar o salvamento no sistema ainda. "
+            "Posso tentar novamente ou revisar com você os dados da tarefa."
+        )
+    return (
+        "Tentei executar isso, mas não consegui validar a operação no sistema. "
+        "Se quiser, eu posso listar os itens abertos ou tentar de forma mais específica."
+    )
+
+
 def _estado_conversacional_ativo(state: str) -> bool:
     return state in {
         "planning",
@@ -2041,6 +2088,15 @@ def chat(mensagem: str, user_id: str) -> str:
         # CAMINHO 2 — resposta direta sem tools
         else:
             resposta = _extrair_texto(response.content)
+            if _eh_intencao_operacional_de_escrita(mensagem):
+                logger.warning(
+                    "[Operational guard] Intent operacional sem tool_use. "
+                    "user=%s mensagem=%r resposta_llm=%r",
+                    user_id,
+                    mensagem,
+                    resposta,
+                )
+                resposta = _resposta_operacional_sem_execucao(mensagem)
 
     except Exception as e:
         import traceback
