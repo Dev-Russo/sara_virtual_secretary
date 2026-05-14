@@ -197,6 +197,27 @@ def _periodo_para_intervalo(
     return None
 
 
+def tarefas_atrasadas_pendentes(user_id: str, agora: datetime | None = None) -> list[Task]:
+    if agora is None:
+        agora = datetime.now(TIMEZONE)
+    inicio, _ = intervalo_dia_logico(agora)
+    db = SessionLocal()
+    try:
+        return (
+            db.query(Task)
+            .filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.due_date != None,
+                Task.due_date < inicio,
+            )
+            .order_by(Task.due_date.asc(), Task.created_at.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+
 def tarefas_pendentes_no_periodo(
     user_id: str,
     period: str | None = None,
@@ -204,6 +225,9 @@ def tarefas_pendentes_no_periodo(
     end_date: str | None = None,
     include_backlog: bool = False,
 ) -> tuple[str, list[Task]]:
+    if (period or "").strip().lower() == "overdue":
+        return "atrasadas", tarefas_atrasadas_pendentes(user_id)
+
     intervalo = _periodo_para_intervalo(period, start_date, end_date)
     if not intervalo:
         return "", []
@@ -448,9 +472,9 @@ def _validar_argumentos(tool_name: str, argumentos: dict) -> str | None:
         end_date = str(argumentos.get("end_date") or "").strip()
         backlog_only = bool(argumentos.get("backlog_only"))
         if not period and not start_date and not backlog_only:
-            return "Erro: informe o período antes de concluir em massa. Use today, yesterday, this_week, last_week, backlog ou start_date."
-        if period and period not in ("today", "yesterday", "this_week", "last_week"):
-            return "Erro: período inválido. Use today, yesterday, this_week ou last_week."
+            return "Erro: informe o período antes de concluir em massa. Use today, yesterday, this_week, last_week, overdue, backlog ou start_date."
+        if period and period not in ("today", "yesterday", "this_week", "last_week", "overdue"):
+            return "Erro: período inválido. Use today, yesterday, this_week, last_week ou overdue."
         for field_name, value in (("start_date", start_date), ("end_date", end_date)):
             if value:
                 try:
@@ -696,21 +720,37 @@ def complete_tasks_in_period(
         finally:
             db.close()
 
-    intervalo = _periodo_para_intervalo(period, start_date, end_date)
-    if not intervalo:
-        return "Me diz o período antes de marcar em massa: hoje, ontem, esta semana, backlog ou uma data específica."
-
-    label, inicio, fim = intervalo
     db = SessionLocal()
     try:
-        query = db.query(Task).filter(
-            Task.user_id == user_id,
-            Task.status == "pending",
-            Task.due_date >= inicio,
-            Task.due_date <= fim,
-        )
+        period_norm = (period or "").strip().lower()
+        if period_norm == "overdue":
+            inicio, _ = intervalo_dia_logico()
+            tasks = (
+                db.query(Task)
+                .filter(
+                    Task.user_id == user_id,
+                    Task.status == "pending",
+                    Task.due_date != None,
+                    Task.due_date < inicio,
+                )
+                .order_by(Task.due_date.asc(), Task.created_at.asc())
+                .all()
+            )
+            label = "atrasadas"
+        else:
+            intervalo = _periodo_para_intervalo(period, start_date, end_date)
+            if not intervalo:
+                return "Me diz o período antes de marcar em massa: hoje, ontem, esta semana, atrasadas, backlog ou uma data específica."
 
-        tasks = query.order_by(Task.due_date.asc(), Task.created_at.asc()).all()
+            label, inicio, fim = intervalo
+            query = db.query(Task).filter(
+                Task.user_id == user_id,
+                Task.status == "pending",
+                Task.due_date >= inicio,
+                Task.due_date <= fim,
+            )
+
+            tasks = query.order_by(Task.due_date.asc(), Task.created_at.asc()).all()
         if include_backlog:
             tasks.extend(
                 db.query(Task)

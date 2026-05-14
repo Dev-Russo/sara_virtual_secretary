@@ -857,8 +857,37 @@ def test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje():
     _cleanup()
 
 
+def test_conclusao_em_massa_reconhece_atrasadas():
+    print("\n[29] Conclusão em massa reconhece tarefas atrasadas")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    agora = datetime.now(TIMEZONE)
+    ontem = (agora - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+    hoje = agora.replace(hour=10, minute=0, second=0, microsecond=0)
+    _create_task("Alongamento atrasado", due_date=ontem)
+    _create_task("Alongamento de hoje", due_date=hoje)
+
+    resposta = chat("Conclua pra mim todas as tarefas que estão atrasadas", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+    resposta_confirmada = chat("sim", user_id=TEST_USER)
+
+    db = SessionLocal()
+    atrasada = db.query(Task).filter(Task.user_id == TEST_USER, Task.title == "Alongamento atrasado").first()
+    de_hoje = db.query(Task).filter(Task.user_id == TEST_USER, Task.title == "Alongamento de hoje").first()
+    db.close()
+
+    check("entrou no fluxo determinístico para atrasadas", "Vou marcar como concluídas as tarefas de atrasadas" in resposta, f"resposta: {resposta}")
+    check("entrou no estado de confirmação em massa", estado == "confirming_bulk_complete", f"estado: {estado}")
+    check("confirmou só as atrasadas", "Marquei como concluídas as tarefas de atrasadas" in resposta_confirmada, f"resposta: {resposta_confirmada}")
+    check("concluiu a atrasada", atrasada is not None and atrasada.status == "done", f"status atrasada: {atrasada.status if atrasada else 'não encontrada'}")
+    check("não concluiu a de hoje", de_hoje is not None and de_hoje.status == "pending", f"status hoje: {de_hoje.status if de_hoje else 'não encontrada'}")
+
+    _cleanup()
+
+
 def test_historico_ignora_registros_sem_created_at():
-    print("\n[29] Histórico ignora registros sem created_at")
+    print("\n[30] Histórico ignora registros sem created_at")
     _reset_capture()
     _cleanup()
 
@@ -927,6 +956,7 @@ async def main():
         test_delete_ambiguo_pede_selecao()
         test_listagem_ignora_categoria_persistida_stale()
         test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje()
+        test_conclusao_em_massa_reconhece_atrasadas()
         test_historico_ignora_registros_sem_created_at()
     finally:
         _cleanup()

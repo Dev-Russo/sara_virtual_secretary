@@ -309,6 +309,11 @@ def _precisa_concluir_periodo(mensagem: str) -> bool:
     if msg_lower in {"tudo", "tudo certo", "ok", "sim"}:
         return False
     msg_norm = _normalizar(mensagem)
+    if re.search(r"\b(atrasad[ao]s?|vencid[ao]s?)\b", msg_norm) and re.search(
+        r"\b(marca|marque|marcar|conclui|concluir|conclua|complete|completar|finaliza|finalizar)\b",
+        msg_norm,
+    ):
+        return True
     if re.search(r"\bbacklog\b", msg_norm) and re.search(r"\b(marca|marque|marcar|conclui|concluir|conclua|complete|completar|finaliza|finalizar)\b", msg_norm):
         return True
     for pattern in BULK_COMPLETE_KEYWORDS:
@@ -327,6 +332,8 @@ def _detectar_periodo_conclusao(mensagem: str) -> dict | None:
         return {"period": "last_week"}
     if re.search(r"\b(essa|esta)\s+semana\b|\bda\s+semana\b", msg_lower):
         return {"period": "this_week"}
+    if re.search(r"\b(atrasad[ao]s?|vencid[ao]s?)\b", msg_lower):
+        return {"period": "overdue"}
     if re.search(r"\bhoje\b", msg_lower):
         return {"period": "today"}
     if re.search(r"\bontem\b", msg_lower):
@@ -402,7 +409,7 @@ def _preparar_confirmacao_conclusao_periodo(user_id: str, periodo: dict) -> str:
 
     label, tarefas = tarefas_pendentes_no_periodo(user_id=user_id, **periodo)
     if not label:
-        return "Não entendi o período. Pode me dizer se é hoje, ontem, esta semana, backlog ou uma data específica?"
+        return "Não entendi o período. Pode me dizer se é hoje, ontem, atrasadas, esta semana, backlog ou uma data específica?"
     if not tarefas:
         set_session_state(user_id, "idle")
         return f"Não achei tarefa pendente em {label}."
