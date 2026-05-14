@@ -170,18 +170,19 @@ async def _processar_callback(data: str, chat_id: str, message_id: int, query_id
 async def _processar_mensagem(chat_id: str, text: str, first_name: str) -> None:
     """Processa a mensagem em background após retornar 200 ao Telegram."""
     try:
+        from app.agent.contracts import STATE_IDLE
         from app.agent.sara_agent import _quer_iniciar_planejamento, limpar_historico_planning
         from app.agent.session import get_session_state
         from app.scheduler.jobs import iniciar_planejamento_manual, iniciar_revisao_check_manual
 
         async with _get_user_lock(chat_id):
-            if (_quer_iniciar_planejamento(text) or text.strip().lower() == HOME_BUTTON_PLANEJAR.lower()) and get_session_state(chat_id) == "idle":
+            if (_quer_iniciar_planejamento(text) or text.strip().lower() == HOME_BUTTON_PLANEJAR.lower()) and get_session_state(chat_id) == STATE_IDLE:
                 limpar_historico_planning(chat_id)
                 handled = await iniciar_planejamento_manual(chat_id, text)
                 if handled:
                     return
 
-            if (_quer_iniciar_check(text) or text.strip().lower() == HOME_BUTTON_REVISAR.lower()) and get_session_state(chat_id) == "idle":
+            if (_quer_iniciar_check(text) or text.strip().lower() == HOME_BUTTON_REVISAR.lower()) and get_session_state(chat_id) == STATE_IDLE:
                 handled = await iniciar_revisao_check_manual(chat_id)
                 if handled:
                     return

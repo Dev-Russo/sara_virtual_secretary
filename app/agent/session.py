@@ -1,23 +1,15 @@
 import logging
 from datetime import datetime, timezone
 
+from app.agent.contracts import (
+    SESSION_STATES_WITH_TTL,
+    STATE_IDLE,
+    VALID_SESSION_STATES,
+)
 from app.db.database import SessionLocal
 from app.models.user_session import UserSession
 
 logger = logging.getLogger(__name__)
-
-VALID_STATES = (
-    "idle",
-    "adding_task",
-    "planning",
-    "reviewing_tasks",
-    "reviewing_pending_tasks",
-    "review_confirming",
-    "confirming_bulk_complete",
-    "confirming_backlog_review",
-    "confirming_reschedule_backlog",
-    "confirming_delete",
-)
 
 # Estados de planejamento expiram após inatividade — evita usuário preso
 STATE_TTL_MINUTES = 180  # 3 horas
@@ -28,19 +20,9 @@ def get_session_state(user_id: str) -> str:
     try:
         session = db.query(UserSession).filter(UserSession.user_id == user_id).first()
         if not session:
-            return "idle"
+            return STATE_IDLE
 
-        if session.state in (
-            "adding_task",
-            "planning",
-            "reviewing_tasks",
-            "reviewing_pending_tasks",
-            "review_confirming",
-            "confirming_bulk_complete",
-            "confirming_backlog_review",
-            "confirming_reschedule_backlog",
-            "confirming_delete",
-        ) and session.updated_at:
+        if session.state in SESSION_STATES_WITH_TTL and session.updated_at:
             updated = session.updated_at
             if updated.tzinfo is None:
                 updated = updated.replace(tzinfo=timezone.utc)
@@ -50,15 +32,15 @@ def get_session_state(user_id: str) -> str:
                     f"[Session] {user_id} estado '{session.state}' expirou "
                     f"({idade_min:.0f}min), resetando para idle"
                 )
-                session.state = "idle"
+                session.state = STATE_IDLE
                 session.context = {}
                 db.commit()
-                return "idle"
+                return STATE_IDLE
 
         return session.state
     except Exception as e:
         logger.error(f"[get_session_state] {e}")
-        return "idle"
+        return STATE_IDLE
     finally:
         db.close()
 
@@ -84,7 +66,7 @@ def set_session_state(
     context: dict | None = None,
     replace_context: bool = False,
 ) -> None:
-    if state not in VALID_STATES:
+    if state not in VALID_SESSION_STATES:
         logger.warning(f"[set_session_state] Estado inválido: {state}")
         return
     db = SessionLocal()
@@ -95,7 +77,7 @@ def set_session_state(
             atual = session.context if isinstance(session.context, dict) else {}
             if context is not None:
                 session.context = dict(context) if replace_context else {**atual, **context}
-            elif state == "idle":
+            elif state == STATE_IDLE:
                 session.context = {}
         else:
             session = UserSession(
@@ -118,7 +100,7 @@ def update_session_context(user_id: str, updates: dict, *, clear: bool = False) 
     try:
         session = db.query(UserSession).filter(UserSession.user_id == user_id).first()
         if not session:
-            session = UserSession(user_id=user_id, state="idle", context={})
+            session = UserSession(user_id=user_id, state=STATE_IDLE, context={})
             db.add(session)
         atual = {} if clear or not isinstance(session.context, dict) else dict(session.context)
         atual.update(updates)
