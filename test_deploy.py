@@ -886,8 +886,33 @@ def test_delete_ambiguo_pede_selecao():
     _cleanup()
 
 
+def test_delete_followup_mantem_contexto_deterministico():
+    print("\n[29] Delete mantém contexto no segundo turno")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    _create_task("Correções no TCC", due_date=hoje)
+    _create_task("Correções de TCC")
+
+    resposta = chat("Agora delete correções de tcc do dia 14", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+    resposta_contexto = chat("Corrcoes de tcc do dia 14", user_id=TEST_USER)
+    resposta_confirmada = chat("sim", user_id=TEST_USER)
+
+    db = SessionLocal()
+    pendentes = db.query(Task).filter(Task.user_id == TEST_USER, Task.status == "pending").order_by(Task.title.asc()).all()
+    db.close()
+
+    check("primeiro turno entrou no fluxo determinístico", estado == "confirming_delete" and "Encontrei mais de uma tarefa para deletar" in resposta, f"estado: {estado} | resposta: {resposta}")
+    check("segundo turno afunilou pela data mesmo com typo", "vou deletar estas tarefas" in resposta_contexto.lower() and "Correções no TCC" in resposta_contexto and "Correções de TCC" not in resposta_contexto, f"resposta: {resposta_contexto}")
+    check("confirmação deletou a tarefa datada", [task.title for task in pendentes] == ["Correções de TCC"], f"pendentes: {[task.title for task in pendentes]} | resposta_final: {resposta_confirmada}")
+
+    _cleanup()
+
+
 def test_listagem_ignora_categoria_persistida_stale():
-    print("\n[29] Listagem ignora categoria persistida stale")
+    print("\n[30] Listagem ignora categoria persistida stale")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -1087,6 +1112,7 @@ async def main():
         test_conclusao_individual_frase_natural_persiste()
         test_conclusao_individual_ambigua_pede_selecao()
         test_delete_ambiguo_pede_selecao()
+        test_delete_followup_mantem_contexto_deterministico()
         test_listagem_ignora_categoria_persistida_stale()
         test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje()
         test_conclusao_em_massa_reconhece_atrasadas()

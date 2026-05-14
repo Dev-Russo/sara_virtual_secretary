@@ -786,6 +786,8 @@ def _eh_pedido_delete_em_massa(mensagem: str) -> bool:
 
 def _extrair_titulo_delete(mensagem: str) -> str | None:
     padroes = [
+        r"^(?:agora\s+)?(?:apaga|apague|deleta|delete|remove|remova|exclui|exclua)\s+(?:a\s+)?tarefa\s+(?P<title>.+)$",
+        r"^(?:agora\s+)?(?:apaga|apague|deleta|delete|remove|remova|exclui|exclua)\s+(?P<title>.+)$",
         r"^(?:apaga|apague|deleta|delete|remove|remova|exclui|exclua)\s+(?:a\s+)?tarefa\s+(?P<title>.+)$",
         r"^(?:apaga|apague|deleta|delete|remove|remova|exclui|exclua)\s+(?P<title>.+)$",
     ]
@@ -799,6 +801,71 @@ def _extrair_titulo_delete(mensagem: str) -> str | None:
         title = re.sub(r"\b(por favor|pra mim|para mim|por gentileza)\b", "", title, flags=re.IGNORECASE).strip(" .")
         return title or None
     return None
+
+
+def _filtrar_tarefas_por_data_local(tarefas: list[Task], filter_date: str | None) -> list[Task]:
+    if not filter_date:
+        return tarefas
+    try:
+        ref = datetime.strptime(filter_date.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return tarefas
+
+    filtradas: list[Task] = []
+    for task in tarefas:
+        if task.due_date is None:
+            continue
+        due_at = task.due_date
+        if due_at.tzinfo is None:
+            due_at = pytz.utc.localize(due_at).astimezone(TIMEZONE)
+        else:
+            due_at = due_at.astimezone(TIMEZONE)
+        if due_at.date() == ref:
+            filtradas.append(task)
+    return filtradas
+
+
+def _extrair_dia_do_mes(mensagem: str) -> int | None:
+    match = re.search(r"\bdia\s+(\d{1,2})\b", _normalizar(mensagem))
+    if not match:
+        return None
+    try:
+        dia = int(match.group(1))
+    except ValueError:
+        return None
+    return dia if 1 <= dia <= 31 else None
+
+
+def _selecionar_tarefas_por_contexto_temporal(mensagem: str, tarefas_db: list[Task]) -> list[str]:
+    filter_date = _calcular_data_filtro(mensagem) or _parse_data_explicita(mensagem)
+    if filter_date:
+        filtradas = _filtrar_tarefas_por_data_local(tarefas_db, filter_date)
+        return [str(task.id) for task in filtradas]
+
+    dia = _extrair_dia_do_mes(mensagem)
+    if dia is None:
+        return []
+
+    selecionadas: list[str] = []
+    for task in tarefas_db:
+        if task.due_date is None:
+            continue
+        due_at = task.due_date
+        if due_at.tzinfo is None:
+            due_at = pytz.utc.localize(due_at).astimezone(TIMEZONE)
+        else:
+            due_at = due_at.astimezone(TIMEZONE)
+        if due_at.day == dia:
+            selecionadas.append(str(task.id))
+    return selecionadas
+
+
+def _resolver_delete_por_contexto(user_id: str, mensagem: str, contexto: dict) -> str:
+    filter_date = contexto.get("delete_filter_date")
+    tarefas = _buscar_tarefas_para_delete(user_id, mensagem)
+    tarefas = _filtrar_tarefas_por_data_local(tarefas, filter_date)
+    label = filter_date or "essa seleção"
+    return _preparar_confirmacao_delete(user_id, tarefas, label=label)
 
 
 def _buscar_tarefas_para_delete(user_id: str, title: str) -> list[Task]:
@@ -915,9 +982,17 @@ def _preparar_delete_deterministico(user_id: str, mensagem: str) -> str | None:
 
     titulo = _extrair_titulo_delete(mensagem)
     if not titulo:
+        filter_date = _calcular_data_filtro(mensagem) or _parse_data_explicita(mensagem)
+        set_session_state(
+            user_id,
+            "confirming_delete_target",
+            context={"delete_filter_date": filter_date},
+            replace_context=True,
+        )
         return "Me diz qual tarefa você quer deletar."
 
     tarefas = _buscar_tarefas_para_delete(user_id, titulo)
+    tarefas = _filtrar_tarefas_por_data_local(tarefas, _calcular_data_filtro(mensagem) or _parse_data_explicita(mensagem))
     return _preparar_confirmacao_delete(user_id, tarefas, label="essa seleção")
 
 
@@ -930,6 +1005,9 @@ def _tratar_confirmacao_delete(user_id: str, mensagem: str, contexto: dict) -> s
     selecionadas = contexto.get("delete_selected_task_ids", [])
     if tarefas and not selecionadas:
         selecionadas = _selecionar_tarefas_reagendamento_backlog(mensagem, tarefas)
+        if not selecionadas:
+            tarefas_db = _buscar_tarefas_revisao(user_id, contexto.get("delete_task_ids", []))
+            selecionadas = _selecionar_tarefas_por_contexto_temporal(mensagem, tarefas_db)
         if not selecionadas:
             return "Me diz quais tarefas você quer deletar: números, nomes ou \"todas\"."
 
@@ -2124,6 +2202,9 @@ def chat(mensagem: str, user_id: str) -> str:
 
     if state == "confirming_bulk_complete":
         return _tratar_confirmacao_conclusao_periodo(user_id, mensagem, session_context)
+
+    if state == "confirming_delete_target":
+        return _resolver_delete_por_contexto(user_id, mensagem, session_context)
 
     if state == "confirming_delete":
         return _tratar_confirmacao_delete(user_id, mensagem, session_context)
