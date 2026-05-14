@@ -47,7 +47,9 @@ from app.agent.tools import (
     complete_task_by_id,
     complete_task_by_id_result,
     complete_tasks_by_ids,
+    complete_tasks_by_ids_result,
     complete_tasks_in_period,
+    complete_tasks_in_period_result,
     delete_tasks_by_ids,
     list_reminders,
     list_tasks,
@@ -468,13 +470,13 @@ def _tratar_confirmacao_conclusao_periodo(user_id: str, mensagem: str, contexto:
 
     if _is_affirmative(mensagem):
         if periodo.get("backlog_only") and periodo.get("backlog_mode") == "select":
-            resultado = complete_tasks_by_ids(contexto.get("bulk_complete_selected_task_ids", []), user_id)
+            resultado = complete_tasks_by_ids_result(contexto.get("bulk_complete_selected_task_ids", []), user_id)
         else:
-            resultado = complete_tasks_in_period(user_id=user_id, **periodo)
+            resultado = complete_tasks_in_period_result(user_id=user_id, **periodo)
         set_session_state(user_id, "idle")
         salvar_historico(user_id, "user", mensagem)
-        salvar_historico(user_id, "assistant", resultado)
-        return resultado
+        salvar_historico(user_id, "assistant", resultado["message"])
+        return resultado["message"]
 
     novo_periodo = _detectar_periodo_conclusao(mensagem)
     if novo_periodo:

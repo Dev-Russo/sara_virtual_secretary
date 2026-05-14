@@ -61,6 +61,14 @@ class TaskWriteResult(TypedDict):
     reason: str | None
 
 
+class BulkTaskWriteResult(TypedDict):
+    status: str
+    message: str
+    task_ids: list[str]
+    task_titles: list[str]
+    reason: str | None
+
+
 def hoje_logico(agora: datetime | None = None) -> date:
     """Data lógica de hoje (com cutoff às 04:00)."""
     if agora is None:
@@ -198,6 +206,23 @@ def _task_write_result(
     }
 
 
+def _bulk_task_write_result(
+    *,
+    status: str,
+    message: str,
+    task_ids: list[uuid.UUID | str] | None = None,
+    task_titles: list[str] | None = None,
+    reason: str | None = None,
+) -> BulkTaskWriteResult:
+    return {
+        "status": status,
+        "message": message,
+        "task_ids": [str(task_id) for task_id in (task_ids or [])],
+        "task_titles": list(task_titles or []),
+        "reason": reason,
+    }
+
+
 def _complete_task_record(task: Task, db, user_id: str, *, validation_hint: str) -> TaskWriteResult:
     task.status = "done"
     task.category = None
@@ -222,6 +247,60 @@ def _complete_task_record(task: Task, db, user_id: str, *, validation_hint: str)
         task_id=task.id,
         task_title=task.title,
         message=f"Tarefa '{task.title}' marcada como concluída! ✅",
+    )
+
+
+def _conclusoes_persistidas(db, task_ids: list[uuid.UUID], user_id: str) -> set[str]:
+    if not task_ids:
+        return set()
+    tarefas = (
+        db.query(Task.id)
+        .filter(
+            Task.user_id == user_id,
+            Task.status == "done",
+            Task.id.in_(task_ids),
+        )
+        .all()
+    )
+    return {str(task_id) for (task_id,) in tarefas}
+
+
+def _complete_task_records(
+    tasks: list[Task],
+    db,
+    user_id: str,
+    *,
+    success_message: str,
+    validation_hint: str,
+) -> BulkTaskWriteResult:
+    for task in tasks:
+        task.status = "done"
+        task.category = None
+        task.updated_at = datetime.now(TIMEZONE)
+
+    db.commit()
+    for task in tasks:
+        db.refresh(task)
+
+    expected_ids = [task.id for task in tasks]
+    persisted_ids = _conclusoes_persistidas(db, expected_ids, user_id)
+    if len(persisted_ids) != len(expected_ids):
+        return _bulk_task_write_result(
+            status="not_confirmed",
+            task_ids=expected_ids,
+            task_titles=[task.title for task in tasks],
+            reason="post_validation_failed",
+            message=(
+                "Tentei concluir as tarefas selecionadas, mas não consegui validar todas as mudanças no sistema. "
+                f"{validation_hint}"
+            ),
+        )
+
+    return _bulk_task_write_result(
+        status="success",
+        task_ids=expected_ids,
+        task_titles=[task.title for task in tasks],
+        message=success_message,
     )
 
 
@@ -773,6 +852,28 @@ def complete_tasks_in_period(
     backlog_mode: str | None = None,
     selection_message: str | None = None,
 ) -> str:
+    return complete_tasks_in_period_result(
+        user_id=user_id,
+        period=period,
+        start_date=start_date,
+        end_date=end_date,
+        include_backlog=include_backlog,
+        backlog_only=backlog_only,
+        backlog_mode=backlog_mode,
+        selection_message=selection_message,
+    )["message"]
+
+
+def complete_tasks_in_period_result(
+    user_id: str,
+    period: str = None,
+    start_date: str = None,
+    end_date: str = None,
+    include_backlog: bool = False,
+    backlog_only: bool = False,
+    backlog_mode: str | None = None,
+    selection_message: str | None = None,
+) -> BulkTaskWriteResult:
     if backlog_only:
         db = SessionLocal()
         try:
@@ -788,20 +889,28 @@ def complete_tasks_in_period(
             )
 
             if not tasks:
-                return "Não achei tarefa pendente no backlog para marcar como concluída."
+                return _bulk_task_write_result(
+                    status="not_found",
+                    reason="task_not_found",
+                    message="Não achei tarefa pendente no backlog para marcar como concluída.",
+                )
 
-            for task in tasks:
-                task.status = "done"
-                task.category = None
-                task.updated_at = datetime.now(TIMEZONE)
-
-            db.commit()
             titulos = ", ".join(f"'{t.title}'" for t in tasks)
-            return f"Marquei como concluídas as tarefas do backlog: {titulos}."
+            return _complete_task_records(
+                tasks,
+                db,
+                user_id,
+                success_message=f"Marquei como concluídas as tarefas do backlog: {titulos}.",
+                validation_hint="Me pede para listar o backlog e eu te mostro o estado real.",
+            )
         except Exception as e:
             db.rollback()
             logger.error(f"[complete_tasks_in_period backlog_only] {e}")
-            return f"Erro ao concluir tarefas: {str(e)}"
+            return _bulk_task_write_result(
+                status="error",
+                reason="exception",
+                message=f"Erro ao concluir tarefas: {str(e)}",
+            )
         finally:
             db.close()
 
@@ -825,7 +934,11 @@ def complete_tasks_in_period(
         else:
             intervalo = _periodo_para_intervalo(period, start_date, end_date)
             if not intervalo:
-                return "Me diz o período antes de marcar em massa: hoje, ontem, esta semana, atrasadas, backlog ou uma data específica."
+                return _bulk_task_write_result(
+                    status="invalid_period",
+                    reason="invalid_period",
+                    message="Me diz o período antes de marcar em massa: hoje, ontem, esta semana, atrasadas, backlog ou uma data específica.",
+                )
 
             label, inicio, fim = intervalo
             query = db.query(Task).filter(
@@ -849,28 +962,44 @@ def complete_tasks_in_period(
             )
 
         if not tasks:
-            return f"Não achei tarefa pendente em {label} para marcar como concluída."
+            return _bulk_task_write_result(
+                status="not_found",
+                reason="task_not_found",
+                message=f"Não achei tarefa pendente em {label} para marcar como concluída.",
+            )
 
-        for task in tasks:
-            task.status = "done"
-            task.category = None
-            task.updated_at = datetime.now(TIMEZONE)
-
-        db.commit()
         titulos = ", ".join(f"'{t.title}'" for t in tasks)
-        return f"Marquei como concluídas as tarefas de {label}: {titulos}."
+        return _complete_task_records(
+            tasks,
+            db,
+            user_id,
+            success_message=f"Marquei como concluídas as tarefas de {label}: {titulos}.",
+            validation_hint="Me pede para listar as tarefas desse período e eu te mostro o estado real.",
+        )
 
     except Exception as e:
         db.rollback()
         logger.error(f"[complete_tasks_in_period] {e}")
-        return f"Erro ao concluir tarefas: {str(e)}"
+        return _bulk_task_write_result(
+            status="error",
+            reason="exception",
+            message=f"Erro ao concluir tarefas: {str(e)}",
+        )
     finally:
         db.close()
 
 
 def complete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
+    return complete_tasks_by_ids_result(task_ids, user_id)["message"]
+
+
+def complete_tasks_by_ids_result(task_ids: list[str], user_id: str) -> BulkTaskWriteResult:
     if not task_ids:
-        return "Nenhuma tarefa pendente encontrada para concluir."
+        return _bulk_task_write_result(
+            status="not_found",
+            reason="task_not_found",
+            message="Nenhuma tarefa pendente encontrada para concluir.",
+        )
 
     db = SessionLocal()
     try:
@@ -882,7 +1011,11 @@ def complete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
                 continue
 
         if not uuids:
-            return "Nenhuma tarefa pendente encontrada para concluir."
+            return _bulk_task_write_result(
+                status="not_found",
+                reason="task_not_found",
+                message="Nenhuma tarefa pendente encontrada para concluir.",
+            )
 
         tasks = (
             db.query(Task)
@@ -895,23 +1028,30 @@ def complete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
         )
 
         if not tasks:
-            return "Nenhuma tarefa pendente encontrada para concluir."
+            return _bulk_task_write_result(
+                status="not_found",
+                reason="task_not_found",
+                message="Nenhuma tarefa pendente encontrada para concluir.",
+            )
 
         ordem = {str(task_id): idx for idx, task_id in enumerate(task_ids)}
         tasks.sort(key=lambda task: ordem.get(str(task.id), 9999))
-
-        for task in tasks:
-            task.status = "done"
-            task.category = None
-            task.updated_at = datetime.now(TIMEZONE)
-
-        db.commit()
         titulos = ", ".join(f"'{t.title}'" for t in tasks)
-        return f"Marquei como concluídas as tarefas selecionadas do backlog: {titulos}."
+        return _complete_task_records(
+            tasks,
+            db,
+            user_id,
+            success_message=f"Marquei como concluídas as tarefas selecionadas do backlog: {titulos}.",
+            validation_hint="Me pede para listar o backlog e eu te mostro o estado real.",
+        )
     except Exception as e:
         db.rollback()
         logger.error(f"[complete_tasks_by_ids] {e}")
-        return f"Erro ao concluir tarefas: {str(e)}"
+        return _bulk_task_write_result(
+            status="error",
+            reason="exception",
+            message=f"Erro ao concluir tarefas: {str(e)}",
+        )
     finally:
         db.close()
 
