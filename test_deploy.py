@@ -788,8 +788,55 @@ def test_complete_task_ambiguo_nao_muta():
     _cleanup()
 
 
+def test_conclusao_individual_frase_natural_persiste():
+    print("\n[26] Conclusão individual por frase natural persiste")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    task_id = _create_task("Trabalho", due_date=hoje)
+
+    resposta = chat("Marque trabalho como concluído também por favor", user_id=TEST_USER)
+    resposta_hoje = chat("Hoje", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefa = db.query(Task).filter(Task.id == task_id).first()
+    db.close()
+
+    check("confirmou conclusão real", "marcada como concluída" in resposta.lower(), f"resposta: {resposta}")
+    check("persistiu conclusão no banco", tarefa is not None and tarefa.status == "done", f"status: {tarefa.status if tarefa else 'não encontrada'}")
+    check("sumiu da listagem seguinte", "Trabalho" not in resposta_hoje, f"resposta_hoje: {resposta_hoje}")
+
+    _cleanup()
+
+
+def test_conclusao_individual_ambigua_pede_selecao():
+    print("\n[27] Conclusão individual ambígua pede seleção")
+    _reset_capture()
+    set_session_state(TEST_USER, "idle")
+
+    hoje = datetime.now(TIMEZONE).replace(hour=10, minute=0, second=0, microsecond=0)
+    _create_task("Correções de TCC")
+    task_id = _create_task("Correções no TCC", due_date=hoje)
+
+    resposta = chat("Marque como concluída correções do TCC de hoje", user_id=TEST_USER)
+    estado = get_session_state(TEST_USER)
+    resposta_selecao = chat("2", user_id=TEST_USER)
+
+    db = SessionLocal()
+    tarefa = db.query(Task).filter(Task.id == task_id).first()
+    db.close()
+
+    check("pediu seleção ao invés de inventar match", "Encontrei mais de uma tarefa para concluir" in resposta, f"resposta: {resposta}")
+    check("entrou em estado de confirmação individual", estado == "confirming_single_complete", f"estado: {estado}")
+    check("concluiu a tarefa escolhida", tarefa is not None and tarefa.status == "done", f"status: {tarefa.status if tarefa else 'não encontrada'}")
+    check("respondeu sucesso após seleção", "Correções no TCC" in resposta_selecao and "marcada como concluída" in resposta_selecao, f"resposta: {resposta_selecao}")
+
+    _cleanup()
+
+
 def test_delete_ambiguo_pede_selecao():
-    print("\n[26] Delete ambíguo pede seleção antes de confirmar")
+    print("\n[28] Delete ambíguo pede seleção antes de confirmar")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -814,7 +861,7 @@ def test_delete_ambiguo_pede_selecao():
 
 
 def test_listagem_ignora_categoria_persistida_stale():
-    print("\n[27] Listagem ignora categoria persistida stale")
+    print("\n[29] Listagem ignora categoria persistida stale")
     _reset_capture()
     set_session_state(TEST_USER, "idle")
 
@@ -1010,6 +1057,8 @@ async def main():
         test_llm_direct_nao_confirma_conclusao_sem_tool()
         test_revisao_confirma_so_o_que_persistiu()
         test_complete_task_ambiguo_nao_muta()
+        test_conclusao_individual_frase_natural_persiste()
+        test_conclusao_individual_ambigua_pede_selecao()
         test_delete_ambiguo_pede_selecao()
         test_listagem_ignora_categoria_persistida_stale()
         test_conclusao_em_massa_reconhece_minhas_atividades_de_hoje()

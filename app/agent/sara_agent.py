@@ -40,6 +40,7 @@ from app.agent.tools import (
     complete_task_by_id,
     complete_tasks_by_ids,
     complete_tasks_in_period,
+    buscar_tarefas_pendentes_por_titulo,
     delete_tasks_by_ids,
     list_reminders,
     list_tasks,
@@ -322,6 +323,73 @@ def _precisa_concluir_periodo(mensagem: str) -> bool:
     return False
 
 
+def _eh_pedido_conclusao_individual(mensagem: str) -> bool:
+    msg_lower = mensagem.lower().strip()
+    if msg_lower in {"tudo", "tudo certo", "ok", "sim"}:
+        return False
+    if _precisa_concluir_periodo(mensagem):
+        return False
+    msg_norm = _normalizar(mensagem)
+    return bool(
+        re.search(r"\b(marca|marque|marcar|conclui|concluir|conclua|complete|completar|finaliza|finalizar)\b", msg_norm)
+    )
+
+
+def _extrair_titulo_conclusao(mensagem: str) -> str | None:
+    padroes = [
+        r"^(?:quero\s+que\s+)?(?:marca|marque|marcar|conclui|concluir|conclua|complete|completar|finaliza|finalizar)\s+(?:pra\s+mim\s+|para\s+mim\s+)?(?P<title>.+?)(?:\s+como?\s+conclu[ií]d[ao]s?)?$",
+        r"^(?:quero\s+que\s+)?(?:marca|marque|marcar|conclui|concluir|conclua|complete|completar|finaliza|finalizar)\s+(?:a\s+)?tarefa\s+(?P<title>.+?)(?:\s+como?\s+conclu[ií]d[ao]s?)?$",
+        r"^(?:vamos\s+)?(?:marcar|concluir|finalizar)\s+(?P<title>.+?)(?:\s+como?\s+conclu[ií]d[ao]s?)?$",
+    ]
+    texto = mensagem.strip().strip(".")
+    for pattern in padroes:
+        match = re.search(pattern, texto, flags=re.IGNORECASE)
+        if not match:
+            continue
+        title = match.group("title").strip(" .")
+        title = re.sub(r"\b(por favor|pra mim|para mim|por gentileza|tamb[eé]m)\b", "", title, flags=re.IGNORECASE).strip(" .")
+        title = re.sub(r"\s+", " ", title).strip()
+        return title or None
+    return None
+
+
+def _preparar_conclusao_individual(user_id: str, mensagem: str) -> str | None:
+    if not _eh_pedido_conclusao_individual(mensagem):
+        return None
+
+    titulo = _extrair_titulo_conclusao(mensagem)
+    if not titulo:
+        return "Me diz qual tarefa você quer marcar como concluída."
+
+    tarefas = buscar_tarefas_pendentes_por_titulo(user_id, titulo)
+    if not tarefas:
+        return (
+            "Não achei uma tarefa pendente com esse nome. "
+            "Se quiser, eu posso listar os itens abertos ou você pode me mandar um trecho mais específico."
+        )
+
+    if len(tarefas) == 1:
+        return complete_task_by_id(str(tarefas[0].id), user_id)
+
+    tarefas_serializadas = _serializar_tarefas_revisao(tarefas)
+    linhas = "\n".join(f"{idx}. {task['title']}" for idx, task in enumerate(tarefas_serializadas, start=1))
+    set_session_state(
+        user_id,
+        "confirming_single_complete",
+        context={
+            "single_complete_title": titulo,
+            "single_complete_tasks": tarefas_serializadas,
+            "single_complete_selected_task_ids": [],
+        },
+        replace_context=True,
+    )
+    return (
+        f"Encontrei mais de uma tarefa para concluir com '{titulo}':\n\n"
+        f"{linhas}\n\n"
+        "Me fala qual delas pelo número ou por um nome mais específico."
+    )
+
+
 def _detectar_periodo_conclusao(mensagem: str) -> dict | None:
     msg_lower = mensagem.lower().strip()
     msg_norm = _normalizar(mensagem)
@@ -477,6 +545,30 @@ def _tratar_confirmacao_conclusao_periodo(user_id: str, mensagem: str, contexto:
     label = contexto.get("bulk_complete_label", "desse período")
     artigo = "do" if label == "backlog" else "de"
     return f"Se estiver certo marcar as tarefas {artigo} {label}, manda um sim. Se não, me fala outro período."
+
+
+def _tratar_confirmacao_conclusao_individual(user_id: str, mensagem: str, contexto: dict) -> str:
+    if _quer_sair_planejamento(mensagem) or re.search(r"\b(n[aã]o|cancela|deixa)\b", _normalizar(mensagem)):
+        set_session_state(user_id, "idle")
+        return "Beleza, não marquei nada como concluído."
+
+    tarefas = contexto.get("single_complete_tasks", [])
+    if not tarefas:
+        set_session_state(user_id, "idle")
+        return "Perdi o contexto da tarefa. Me pede de novo que eu tento."
+
+    selecionadas = _selecionar_tarefas_reagendamento_backlog(mensagem, tarefas)
+    if not selecionadas:
+        return "Me diz qual tarefa você quer concluir: número ou um nome mais específico."
+
+    if len(selecionadas) > 1:
+        escolhidas = [task for task in tarefas if task["task_id"] in selecionadas]
+        linhas = "\n".join(f"{idx + 1}. {task['title']}" for idx, task in enumerate(escolhidas))
+        return f"Ainda ficou ambíguo. Escolhe só uma tarefa:\n\n{linhas}"
+
+    resultado = complete_task_by_id(selecionadas[0], user_id)
+    set_session_state(user_id, "idle")
+    return resultado
 
 
 def _precisa_listar_tarefas(mensagem: str) -> bool:
@@ -1938,6 +2030,9 @@ def chat(mensagem: str, user_id: str) -> str:
             return mensagem_cancelamento()
         return _tratar_confirmacao_revisao(user_id, mensagem, session_context)
 
+    if state == "confirming_single_complete":
+        return _tratar_confirmacao_conclusao_individual(user_id, mensagem, session_context)
+
     if state == "confirming_bulk_complete":
         return _tratar_confirmacao_conclusao_periodo(user_id, mensagem, session_context)
 
@@ -2008,6 +2103,10 @@ def chat(mensagem: str, user_id: str) -> str:
         else:
             resposta = _preparar_confirmacao_conclusao_periodo(user_id, periodo)
         return _finalizar_resposta(resposta, route="forced_bulk_complete")
+
+    resposta_conclusao = _preparar_conclusao_individual(user_id, mensagem)
+    if resposta_conclusao:
+        return _finalizar_resposta(resposta_conclusao, route="forced_complete_task")
 
     resposta_delete = _preparar_delete_deterministico(user_id, mensagem)
     if resposta_delete:

@@ -143,6 +143,14 @@ def _buscar_tarefas_por_titulo(db, user_id: str, title: str) -> list[Task]:
     return list(candidatos.values())
 
 
+def buscar_tarefas_pendentes_por_titulo(user_id: str, title: str) -> list[Task]:
+    db = SessionLocal()
+    try:
+        return _buscar_tarefas_por_titulo(db, user_id, title)
+    finally:
+        db.close()
+
+
 def _mensagem_ambiguidade_tarefas(title: str, tarefas: list[Task], acao: str) -> str:
     linhas = "\n".join(f"{idx}. {task.title}" for idx, task in enumerate(tarefas, start=1))
     return (
