@@ -39,6 +39,7 @@ from app.agent.contracts import (
     PERIOD_YESTERDAY,
 )
 from app.agent.dates import parse_explicit_or_relative_date, resolve_relative_iso_date
+from app.agent.review_helpers import summarize_review_outcome
 from app.agent.tools import (
     TOOLS_MAP,
     TOOLS_SCHEMA,
@@ -57,7 +58,7 @@ from app.agent.tools import (
     resumo_backlog,
     resumo_hoje,
     reschedule_tasks_by_ids,
-    reschedule_task,
+    reschedule_task_result,
     save_task,
     save_tasks,
     tarefas_backlog_pendentes,
@@ -79,7 +80,6 @@ from app.agent.copy import (
     mensagem_confirmacao_revisao,
     mensagem_home,
     mensagem_pergunta_data_planejamento,
-    mensagem_revisao_aplicada,
     mensagem_revisao_backlog_disponivel,
     mensagem_revisao_sem_match,
     mensagem_tarefa_backlog_salva,
@@ -1202,47 +1202,33 @@ def _gerar_confirmacao_revisao(user_id: str, contexto: dict) -> str:
 
 def _aplicar_revisao(user_id: str, contexto: dict) -> str:
     tarefas = contexto.get("review_tasks", [])
-    task_map = {task["task_id"]: task for task in tarefas}
+    task_titles_by_id = {task["task_id"]: task["title"] for task in tarefas}
     done_ids = contexto.get("done_task_ids", [])
     pending_ids = contexto.get("pending_task_ids", [])
     pending_action = contexto.get("pending_action", "keep")
     pending_date = contexto.get("pending_date")
 
-    done_confirmadas: list[str] = []
-    moved_confirmadas: list[str] = []
-    pending_confirmadas: list[str] = []
-    falhas: list[str] = []
+    done_status_by_id: dict[str, str] = {}
+    move_status_by_id: dict[str, str] = {}
 
     for task_id in done_ids:
         resultado = complete_task_by_id_result(task_id, user_id)
-        if resultado["status"] == "success":
-            if task_id in task_map:
-                done_confirmadas.append(task_map[task_id]["title"])
-        elif task_id in task_map:
-            falhas.append(task_map[task_id]["title"])
+        done_status_by_id[task_id] = resultado["status"]
 
     if pending_action == "move" and pending_date:
         for task_id in pending_ids:
-            resultado = reschedule_task(task_id, user_id, pending_date)
-            if "reagendada para" in resultado.lower():
-                if task_id in task_map:
-                    moved_confirmadas.append(task_map[task_id]["title"])
-            elif task_id in task_map:
-                falhas.append(task_map[task_id]["title"])
-    else:
-        pending_confirmadas = [
-            task_map[task_id]["title"]
-            for task_id in pending_ids
-            if task_id in task_map
-        ]
+            resultado = reschedule_task_result(task_id, user_id, pending_date)
+            move_status_by_id[task_id] = resultado["status"]
 
-    resumo = mensagem_revisao_aplicada(
-        done_confirmadas,
-        moved_confirmadas if pending_action == "move" and pending_date else pending_confirmadas,
-        pending_date if pending_action == "move" else None,
+    resumo = summarize_review_outcome(
+        task_titles_by_id=task_titles_by_id,
+        done_ids=done_ids,
+        done_status_by_id=done_status_by_id,
+        pending_ids=pending_ids,
+        pending_action=pending_action,
+        pending_date=pending_date if pending_action == "move" else None,
+        move_status_by_id=move_status_by_id,
     )
-    if falhas:
-        resumo += " Não consegui aplicar tudo em: " + ", ".join(falhas) + "."
 
     if contexto.get("review_mode") == "check":
         set_session_state(user_id, "idle")
