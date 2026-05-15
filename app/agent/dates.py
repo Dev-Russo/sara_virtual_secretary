@@ -74,3 +74,55 @@ def parse_task_due_date(value: str | None, *, timezone: pytz.BaseTzInfo) -> tupl
         except ValueError:
             continue
     raise ValueError("invalid_due_date")
+
+
+def local_day_bounds(value: date, *, timezone: pytz.BaseTzInfo) -> tuple[datetime, datetime]:
+    start = timezone.localize(datetime.combine(value, datetime.min.time()))
+    end = timezone.localize(datetime.combine(value, datetime.max.time().replace(microsecond=0)))
+    return start, end
+
+
+def parse_iso_date_range(
+    start_date: str,
+    end_date: str | None = None,
+    *,
+    timezone: pytz.BaseTzInfo,
+) -> tuple[str, datetime, datetime] | None:
+    try:
+        start = datetime.strptime(start_date.strip(), "%Y-%m-%d").date()
+        end = datetime.strptime((end_date or start_date).strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+    start_dt, _ = local_day_bounds(start, timezone=timezone)
+    _, end_dt = local_day_bounds(end, timezone=timezone)
+    label = start_date if start_date == (end_date or start_date) else f"{start_date} a {end_date}"
+    return label, start_dt, end_dt
+
+
+def resolve_named_period_range(
+    period: str,
+    *,
+    today: date,
+    logical_today_bounds: tuple[datetime, datetime],
+    timezone: pytz.BaseTzInfo,
+) -> tuple[str, datetime, datetime] | None:
+    normalized = (period or "").strip().lower()
+
+    if normalized == "today":
+        start, end = logical_today_bounds
+        return "hoje", start, end
+    if normalized == "yesterday":
+        start, end = local_day_bounds(today - timedelta(days=1), timezone=timezone)
+        return "ontem", start, end
+    if normalized == "this_week":
+        monday = today - timedelta(days=today.weekday())
+        start, _ = local_day_bounds(monday, timezone=timezone)
+        _, end = local_day_bounds(monday + timedelta(days=6), timezone=timezone)
+        return "esta semana", start, end
+    if normalized == "last_week":
+        monday = today - timedelta(days=today.weekday() + 7)
+        start, _ = local_day_bounds(monday, timezone=timezone)
+        _, end = local_day_bounds(monday + timedelta(days=6), timezone=timezone)
+        return "semana passada", start, end
+    return None

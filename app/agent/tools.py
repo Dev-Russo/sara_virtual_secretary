@@ -38,7 +38,7 @@ from app.agent.contracts import (
     WRITE_STATUS_NOT_FOUND,
     WRITE_STATUS_SUCCESS,
 )
-from app.agent.dates import parse_task_due_date
+from app.agent.dates import local_day_bounds, parse_iso_date_range, parse_task_due_date, resolve_named_period_range
 from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.reminder import Reminder
@@ -350,9 +350,7 @@ def _complete_task_records(
 
 
 def _intervalo_data_local(valor: date) -> tuple[datetime, datetime]:
-    inicio = TIMEZONE.localize(datetime.combine(valor, datetime.min.time()))
-    fim = TIMEZONE.localize(datetime.combine(valor, datetime.max.time().replace(microsecond=0)))
-    return inicio, fim
+    return local_day_bounds(valor, timezone=TIMEZONE)
 
 
 def _parse_due_date_tarefa(valor: str | None) -> tuple[datetime | None, bool]:
@@ -368,34 +366,14 @@ def _periodo_para_intervalo(
     period_norm = (period or "").strip().lower()
 
     if start_date:
-        try:
-            inicio_date = datetime.strptime(start_date.strip(), "%Y-%m-%d").date()
-            fim_date = datetime.strptime((end_date or start_date).strip(), "%Y-%m-%d").date()
-        except ValueError:
-            return None
-        inicio, _ = _intervalo_data_local(inicio_date)
-        _, fim = _intervalo_data_local(fim_date)
-        label = start_date if start_date == (end_date or start_date) else f"{start_date} a {end_date}"
-        return label, inicio, fim
+        return parse_iso_date_range(start_date, end_date, timezone=TIMEZONE)
 
-    if period_norm == PERIOD_TODAY:
-        inicio, fim = intervalo_dia_logico()
-        return "hoje", inicio, fim
-    if period_norm == PERIOD_YESTERDAY:
-        inicio, fim = _intervalo_data_local(hoje - timedelta(days=1))
-        return "ontem", inicio, fim
-    if period_norm == PERIOD_THIS_WEEK:
-        segunda = hoje - timedelta(days=hoje.weekday())
-        inicio, _ = _intervalo_data_local(segunda)
-        _, fim = _intervalo_data_local(segunda + timedelta(days=6))
-        return "esta semana", inicio, fim
-    if period_norm == PERIOD_LAST_WEEK:
-        segunda = hoje - timedelta(days=hoje.weekday() + 7)
-        inicio, _ = _intervalo_data_local(segunda)
-        _, fim = _intervalo_data_local(segunda + timedelta(days=6))
-        return "semana passada", inicio, fim
-
-    return None
+    return resolve_named_period_range(
+        period_norm,
+        today=hoje,
+        logical_today_bounds=intervalo_dia_logico(),
+        timezone=TIMEZONE,
+    )
 
 
 def tarefas_atrasadas_pendentes(user_id: str, agora: datetime | None = None) -> list[Task]:
@@ -838,16 +816,13 @@ def list_tasks(user_id: str, filter_date: str = None) -> str:
         )
 
         if filter_date and isinstance(filter_date, str) and filter_date.strip():
-            try:
-                date = datetime.strptime(filter_date.strip(), "%Y-%m-%d")
-                inicio = TIMEZONE.localize(date.replace(hour=0, minute=0))
-                fim = TIMEZONE.localize(date.replace(hour=23, minute=59))
+            parsed_range = parse_iso_date_range(filter_date, timezone=TIMEZONE)
+            if parsed_range:
+                _, inicio, fim = parsed_range
                 query = query.filter(
                     Task.due_date >= inicio,
                     Task.due_date <= fim,
                 )
-            except ValueError:
-                pass
 
         tasks = query.order_by(Task.due_date.asc().nullslast()).all()
 
