@@ -27,6 +27,7 @@ from app.agent.contracts import (
     PERIOD_YESTERDAY,
     VALID_BULK_COMPLETE_PERIODS,
     WRITE_REASON_EXCEPTION,
+    WRITE_REASON_INVALID_DUE_DATE,
     WRITE_REASON_INVALID_PERIOD,
     WRITE_REASON_POST_VALIDATION_FAILED,
     WRITE_REASON_TASK_NOT_FOUND,
@@ -286,6 +287,25 @@ def _tarefas_ainda_persistidas(db, task_ids: list[uuid.UUID], user_id: str) -> s
         .all()
     )
     return {str(task_id) for (task_id,) in tarefas}
+
+
+def _reagendamento_persistido(
+    db,
+    task_id: uuid.UUID,
+    user_id: str,
+    expected_due_date: datetime,
+) -> bool:
+    tarefa = (
+        db.query(Task)
+        .filter(
+            Task.id == task_id,
+            Task.user_id == user_id,
+        )
+        .first()
+    )
+    if not tarefa or tarefa.due_date is None:
+        return False
+    return _due_date_key(tarefa.due_date) == _due_date_key(expected_due_date)
 
 
 def _complete_task_records(
@@ -775,12 +795,11 @@ def reschedule_tasks_by_ids(task_ids: list[str], user_id: str, new_due_date: str
     moved: list[str] = []
     errors: list[str] = []
     for task_id in task_ids:
-        result = reschedule_task(str(task_id), user_id, new_due_date)
-        if "erro" in result.lower() or "nenhuma tarefa" in result.lower():
-            errors.append(result)
+        result = reschedule_task_result(str(task_id), user_id, new_due_date)
+        if result["status"] != WRITE_STATUS_SUCCESS:
+            errors.append(result["message"])
         else:
-            match = re.search(r"Tarefa '(.+?)' reagendada", result)
-            moved.append(match.group(1) if match else str(task_id))
+            moved.append(result["task_title"] or str(task_id))
 
     partes: list[str] = []
     if moved:
@@ -1302,6 +1321,10 @@ def delete_tasks_by_ids_result(task_ids: list[str], user_id: str) -> BulkTaskWri
 
 
 def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
+    return reschedule_task_result(task_id, user_id, new_due_date)["message"]
+
+
+def reschedule_task_result(task_id: str, user_id: str, new_due_date: str) -> TaskWriteResult:
     db = SessionLocal()
     try:
         task = db.query(Task).filter(
@@ -1311,7 +1334,12 @@ def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
         ).first()
 
         if not task:
-            return "Nenhuma tarefa pendente encontrada para reagendar."
+            return _task_write_result(
+                status=WRITE_STATUS_NOT_FOUND,
+                task_id=task_id,
+                reason=WRITE_REASON_TASK_NOT_FOUND,
+                message="Nenhuma tarefa pendente encontrada para reagendar.",
+            )
 
         parsed_date = None
         used_fmt = None
@@ -1324,7 +1352,13 @@ def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
                 continue
 
         if parsed_date is None:
-            return "Formato de data inválido. Use 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM'."
+            return _task_write_result(
+                status=WRITE_STATUS_ERROR,
+                task_id=task_id,
+                task_title=task.title,
+                reason=WRITE_REASON_INVALID_DUE_DATE,
+                message="Formato de data inválido. Use 'YYYY-MM-DD' ou 'YYYY-MM-DD HH:MM'.",
+            )
 
         if used_fmt == "%Y-%m-%d" and task.due_date:
             atual = task.due_date
@@ -1338,15 +1372,38 @@ def reschedule_task(task_id: str, user_id: str, new_due_date: str) -> str:
         atualizar_categoria_tarefa(task)
         task.updated_at = datetime.now(TIMEZONE)
         db.commit()
+        db.refresh(task)
 
-        return (
-            f"Tarefa '{task.title}' reagendada para "
-            f"{_formatar_prazo_tarefa(task.due_date)}."
+        if not _reagendamento_persistido(db, task.id, user_id, task.due_date):
+            return _task_write_result(
+                status=WRITE_STATUS_NOT_CONFIRMED,
+                task_id=task.id,
+                task_title=task.title,
+                reason=WRITE_REASON_POST_VALIDATION_FAILED,
+                message=(
+                    f"Tentei reagendar '{task.title}', mas não consegui validar a mudança no sistema. "
+                    "Me pede para listar as tarefas e eu te mostro o estado real."
+                ),
+            )
+
+        return _task_write_result(
+            status=WRITE_STATUS_SUCCESS,
+            task_id=task.id,
+            task_title=task.title,
+            message=(
+                f"Tarefa '{task.title}' reagendada para "
+                f"{_formatar_prazo_tarefa(task.due_date)}."
+            ),
         )
     except Exception as e:
         db.rollback()
         logger.error(f"[reschedule_task] {e}")
-        return f"Erro ao reagendar tarefa: {str(e)}"
+        return _task_write_result(
+            status=WRITE_STATUS_ERROR,
+            task_id=task_id,
+            reason=WRITE_REASON_EXCEPTION,
+            message=f"Erro ao reagendar tarefa: {str(e)}",
+        )
     finally:
         db.close()
 

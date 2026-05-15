@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app.agent.contracts import (
     WRITE_REASON_EXCEPTION,
+    WRITE_REASON_INVALID_DUE_DATE,
     WRITE_REASON_INVALID_PERIOD,
     WRITE_REASON_POST_VALIDATION_FAILED,
     WRITE_REASON_TASK_NOT_FOUND,
@@ -14,7 +15,12 @@ from app.agent.contracts import (
     WRITE_STATUS_NOT_FOUND,
     WRITE_STATUS_SUCCESS,
 )
-from app.agent.tools import _bulk_task_write_result, _task_write_result, delete_tasks_by_ids_result
+from app.agent.tools import (
+    _bulk_task_write_result,
+    _task_write_result,
+    delete_tasks_by_ids_result,
+    reschedule_task_result,
+)
 
 
 class _FakeQuery:
@@ -26,6 +32,10 @@ class _FakeQuery:
 
     def all(self):
         return self._supplier()
+
+    def first(self):
+        values = self._supplier()
+        return values[0] if values else None
 
 
 class _FakeDB:
@@ -48,6 +58,9 @@ class _FakeDB:
         return None
 
     def rollback(self):
+        return None
+
+    def refresh(self, task):
         return None
 
     def close(self):
@@ -91,6 +104,7 @@ class OperationContractsTest(unittest.TestCase):
         self.assertEqual("task_not_found", WRITE_REASON_TASK_NOT_FOUND)
         self.assertEqual("exception", WRITE_REASON_EXCEPTION)
         self.assertEqual("invalid_period", WRITE_REASON_INVALID_PERIOD)
+        self.assertEqual("invalid_due_date", WRITE_REASON_INVALID_DUE_DATE)
         self.assertEqual("post_validation_failed", WRITE_REASON_POST_VALIDATION_FAILED)
 
     def test_delete_tasks_by_ids_result_returns_success_with_post_validation(self) -> None:
@@ -117,6 +131,28 @@ class OperationContractsTest(unittest.TestCase):
         self.assertEqual(WRITE_REASON_POST_VALIDATION_FAILED, result["reason"])
         self.assertEqual([str(task.id)], result["task_ids"])
         self.assertEqual(["Persistida"], result["task_titles"])
+
+    def test_reschedule_task_result_returns_success_with_shared_contract(self) -> None:
+        task = SimpleNamespace(id=uuid.uuid4(), title="Mover", user_id="u1", status="pending", due_date=None)
+        fake_db = _FakeDB([task])
+
+        with patch("app.agent.tools.SessionLocal", return_value=fake_db):
+            result = reschedule_task_result(str(task.id), "u1", "2026-05-20 10:30")
+
+        self.assertEqual(WRITE_STATUS_SUCCESS, result["status"])
+        self.assertEqual("Mover", result["task_title"])
+        self.assertIn("reagendada para", result["message"])
+
+    def test_reschedule_task_result_reports_invalid_due_date_with_shared_reason(self) -> None:
+        task = SimpleNamespace(id=uuid.uuid4(), title="Mover", user_id="u1", status="pending", due_date=None)
+        fake_db = _FakeDB([task])
+
+        with patch("app.agent.tools.SessionLocal", return_value=fake_db):
+            result = reschedule_task_result(str(task.id), "u1", "amanha cedo")
+
+        self.assertEqual(WRITE_STATUS_ERROR, result["status"])
+        self.assertEqual(WRITE_REASON_INVALID_DUE_DATE, result["reason"])
+        self.assertEqual("Mover", result["task_title"])
 
 
 if __name__ == "__main__":
