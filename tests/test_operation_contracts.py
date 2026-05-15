@@ -1,4 +1,7 @@
 import unittest
+import uuid
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.agent.contracts import (
     WRITE_REASON_EXCEPTION,
@@ -11,7 +14,44 @@ from app.agent.contracts import (
     WRITE_STATUS_NOT_FOUND,
     WRITE_STATUS_SUCCESS,
 )
-from app.agent.tools import _bulk_task_write_result, _task_write_result
+from app.agent.tools import _bulk_task_write_result, _task_write_result, delete_tasks_by_ids_result
+
+
+class _FakeQuery:
+    def __init__(self, supplier):
+        self._supplier = supplier
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def all(self):
+        return self._supplier()
+
+
+class _FakeDB:
+    def __init__(self, tasks, *, persist_after_delete: bool = False):
+        self.tasks = list(tasks)
+        self.persist_after_delete = persist_after_delete
+        self.deleted_ids: list[uuid.UUID] = []
+
+    def query(self, target):
+        if getattr(target, "name", None) == "id":
+            return _FakeQuery(lambda: [(task.id,) for task in self.tasks])
+        return _FakeQuery(lambda: list(self.tasks))
+
+    def delete(self, task):
+        self.deleted_ids.append(task.id)
+        if not self.persist_after_delete:
+            self.tasks = [current for current in self.tasks if current.id != task.id]
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        return None
+
+    def close(self):
+        return None
 
 
 class OperationContractsTest(unittest.TestCase):
@@ -52,6 +92,31 @@ class OperationContractsTest(unittest.TestCase):
         self.assertEqual("exception", WRITE_REASON_EXCEPTION)
         self.assertEqual("invalid_period", WRITE_REASON_INVALID_PERIOD)
         self.assertEqual("post_validation_failed", WRITE_REASON_POST_VALIDATION_FAILED)
+
+    def test_delete_tasks_by_ids_result_returns_success_with_post_validation(self) -> None:
+        task_a = SimpleNamespace(id=uuid.uuid4(), title="A", user_id="u1", status="pending")
+        task_b = SimpleNamespace(id=uuid.uuid4(), title="B", user_id="u1", status="pending")
+        fake_db = _FakeDB([task_a, task_b])
+
+        with patch("app.agent.tools.SessionLocal", return_value=fake_db):
+            result = delete_tasks_by_ids_result([str(task_b.id), str(task_a.id)], "u1")
+
+        self.assertEqual(WRITE_STATUS_SUCCESS, result["status"])
+        self.assertEqual([str(task_b.id), str(task_a.id)], result["task_ids"])
+        self.assertEqual(["B", "A"], result["task_titles"])
+        self.assertIsNone(result["reason"])
+
+    def test_delete_tasks_by_ids_result_reports_not_confirmed_when_rows_remain(self) -> None:
+        task = SimpleNamespace(id=uuid.uuid4(), title="Persistida", user_id="u1", status="pending")
+        fake_db = _FakeDB([task], persist_after_delete=True)
+
+        with patch("app.agent.tools.SessionLocal", return_value=fake_db):
+            result = delete_tasks_by_ids_result([str(task.id)], "u1")
+
+        self.assertEqual(WRITE_STATUS_NOT_CONFIRMED, result["status"])
+        self.assertEqual(WRITE_REASON_POST_VALIDATION_FAILED, result["reason"])
+        self.assertEqual([str(task.id)], result["task_ids"])
+        self.assertEqual(["Persistida"], result["task_titles"])
 
 
 if __name__ == "__main__":

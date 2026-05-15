@@ -274,6 +274,20 @@ def _conclusoes_persistidas(db, task_ids: list[uuid.UUID], user_id: str) -> set[
     return {str(task_id) for (task_id,) in tarefas}
 
 
+def _tarefas_ainda_persistidas(db, task_ids: list[uuid.UUID], user_id: str) -> set[str]:
+    if not task_ids:
+        return set()
+    tarefas = (
+        db.query(Task.id)
+        .filter(
+            Task.user_id == user_id,
+            Task.id.in_(task_ids),
+        )
+        .all()
+    )
+    return {str(task_id) for (task_id,) in tarefas}
+
+
 def _complete_task_records(
     tasks: list[Task],
     db,
@@ -1203,8 +1217,16 @@ def delete_all_tasks(user_id: str, filter_date: str = None) -> str:
 
 
 def delete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
+    return delete_tasks_by_ids_result(task_ids, user_id)["message"]
+
+
+def delete_tasks_by_ids_result(task_ids: list[str], user_id: str) -> BulkTaskWriteResult:
     if not task_ids:
-        return "Nenhuma tarefa pendente encontrada para deletar."
+        return _bulk_task_write_result(
+            status=WRITE_STATUS_NOT_FOUND,
+            reason=WRITE_REASON_TASK_NOT_FOUND,
+            message="Nenhuma tarefa pendente encontrada para deletar.",
+        )
 
     db = SessionLocal()
     try:
@@ -1216,7 +1238,11 @@ def delete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
                 continue
 
         if not uuids:
-            return "Nenhuma tarefa pendente encontrada para deletar."
+            return _bulk_task_write_result(
+                status=WRITE_STATUS_NOT_FOUND,
+                reason=WRITE_REASON_TASK_NOT_FOUND,
+                message="Nenhuma tarefa pendente encontrada para deletar.",
+            )
 
         tasks = (
             db.query(Task)
@@ -1229,21 +1255,48 @@ def delete_tasks_by_ids(task_ids: list[str], user_id: str) -> str:
         )
 
         if not tasks:
-            return "Nenhuma tarefa pendente encontrada para deletar."
+            return _bulk_task_write_result(
+                status=WRITE_STATUS_NOT_FOUND,
+                reason=WRITE_REASON_TASK_NOT_FOUND,
+                message="Nenhuma tarefa pendente encontrada para deletar.",
+            )
 
         ordem = {str(task_id): idx for idx, task_id in enumerate(task_ids)}
         tasks.sort(key=lambda task: ordem.get(str(task.id), 9999))
 
+        expected_ids = [task.id for task in tasks]
         titulos = [task.title for task in tasks]
         for task in tasks:
             db.delete(task)
         db.commit()
 
-        return f"{len(titulos)} tarefa(s) deletada(s): {', '.join(titulos)}"
+        persisted_ids = _tarefas_ainda_persistidas(db, expected_ids, user_id)
+        if persisted_ids:
+            return _bulk_task_write_result(
+                status=WRITE_STATUS_NOT_CONFIRMED,
+                task_ids=expected_ids,
+                task_titles=titulos,
+                reason=WRITE_REASON_POST_VALIDATION_FAILED,
+                message=(
+                    "Tentei deletar as tarefas selecionadas, mas não consegui validar todas as remoções no sistema. "
+                    "Me pede para listar as pendentes e eu te mostro o estado real."
+                ),
+            )
+
+        return _bulk_task_write_result(
+            status=WRITE_STATUS_SUCCESS,
+            task_ids=expected_ids,
+            task_titles=titulos,
+            message=f"{len(titulos)} tarefa(s) deletada(s): {', '.join(titulos)}",
+        )
     except Exception as e:
         db.rollback()
         logger.error(f"[delete_tasks_by_ids] {e}")
-        return f"Erro ao deletar tarefas: {str(e)}"
+        return _bulk_task_write_result(
+            status=WRITE_STATUS_ERROR,
+            reason=WRITE_REASON_EXCEPTION,
+            message=f"Erro ao deletar tarefas: {str(e)}",
+        )
     finally:
         db.close()
 
