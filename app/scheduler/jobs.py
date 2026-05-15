@@ -13,10 +13,9 @@ Correções aplicadas:
 """
 
 import logging
-import re
 import uuid
 import secrets
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -37,6 +36,7 @@ from app.services.telegram import (
 )
 from app.agent.session import set_session_state, get_session_context
 from app.agent.sara_agent import limpar_historico_planning
+from app.agent.dates import next_day_iso, parse_explicit_or_relative_date
 from app.agent.copy import (
     mensagem_abertura_planejamento,
     mensagem_pergunta_data_planejamento,
@@ -60,7 +60,7 @@ def _amanha_logico_iso(agora: datetime | None = None) -> str:
     from app.agent.tools import hoje_logico
     if agora is None:
         agora = datetime.now(TIMEZONE)
-    return (hoje_logico(agora) + timedelta(days=1)).strftime("%Y-%m-%d")
+    return next_day_iso(hoje_logico(agora))
 
 
 def _checkin_alcancado(agora: datetime | None = None) -> bool:
@@ -76,36 +76,7 @@ def _parse_data_explicita(mensagem: str, agora: datetime | None = None) -> str |
         return None
     if agora is None:
         agora = datetime.now(TIMEZONE)
-
-    msg = mensagem.lower().strip()
-    if re.search(r"\bdepois de amanh[aã]\b", msg):
-        return (agora.date() + timedelta(days=2)).strftime("%Y-%m-%d")
-    if re.search(r"\bamanh[aã]\b", msg):
-        return (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d")
-    if re.search(r"\bhoje\b", msg):
-        return agora.date().strftime("%Y-%m-%d")
-
-    match_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", msg)
-    if match_iso:
-        try:
-            return datetime.strptime(match_iso.group(1), "%Y-%m-%d").strftime("%Y-%m-%d")
-        except ValueError:
-            return None
-
-    match_br = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b", msg)
-    if match_br:
-        dia = int(match_br.group(1))
-        mes = int(match_br.group(2))
-        ano = int(match_br.group(3) or agora.year)
-        try:
-            parsed = date(ano, mes, dia)
-            if match_br.group(3) is None and parsed < agora.date():
-                parsed = date(ano + 1, mes, dia)
-            return parsed.strftime("%Y-%m-%d")
-        except ValueError:
-            return None
-
-    return None
+    return parse_explicit_or_relative_date(mensagem, now=agora)
 
 
 def resolver_data_alvo_manual(mensagem: str, agora: datetime | None = None) -> str | None:

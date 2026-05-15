@@ -5,6 +5,7 @@ import pytz
 
 from app.agent.dates import (
     local_day_bounds,
+    next_day_iso,
     parse_explicit_or_relative_date,
     parse_iso_date_range,
     parse_task_due_date,
@@ -98,6 +99,9 @@ class DateContractsTest(unittest.TestCase):
         self.assertEqual("esta semana", label)
         self.assertEqual("2026-05-18 00:00", start.strftime("%Y-%m-%d %H:%M"))
         self.assertEqual("2026-05-24 23:59", end.strftime("%Y-%m-%d %H:%M"))
+
+    def test_next_day_iso_formats_next_calendar_day(self) -> None:
+        self.assertEqual("2026-05-21", next_day_iso(date(2026, 5, 20)))
 
 
 if __name__ == "__main__":

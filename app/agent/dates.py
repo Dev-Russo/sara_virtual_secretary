@@ -26,6 +26,10 @@ def resolve_relative_iso_date(
     return None
 
 
+def next_day_iso(base_date: date) -> str:
+    return (base_date + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 def parse_explicit_or_relative_date(message: str, *, now: datetime) -> str | None:
     if not message:
         return None
