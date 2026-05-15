@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.agent.contracts import (
+    WRITE_REASON_AMBIGUOUS_TASK,
     WRITE_REASON_EXCEPTION,
     WRITE_REASON_INVALID_DUE_DATE,
     WRITE_REASON_INVALID_PERIOD,
@@ -18,6 +19,8 @@ from app.agent.contracts import (
 from app.agent.tools import (
     _bulk_task_write_result,
     _task_write_result,
+    delete_all_tasks_result,
+    delete_task_result,
     delete_tasks_by_ids_result,
     reschedule_task_result,
 )
@@ -102,6 +105,7 @@ class OperationContractsTest(unittest.TestCase):
         self.assertEqual("invalid_period", WRITE_STATUS_INVALID_PERIOD)
         self.assertEqual("not_confirmed", WRITE_STATUS_NOT_CONFIRMED)
         self.assertEqual("task_not_found", WRITE_REASON_TASK_NOT_FOUND)
+        self.assertEqual("ambiguous_task", WRITE_REASON_AMBIGUOUS_TASK)
         self.assertEqual("exception", WRITE_REASON_EXCEPTION)
         self.assertEqual("invalid_period", WRITE_REASON_INVALID_PERIOD)
         self.assertEqual("invalid_due_date", WRITE_REASON_INVALID_DUE_DATE)
@@ -131,6 +135,42 @@ class OperationContractsTest(unittest.TestCase):
         self.assertEqual(WRITE_REASON_POST_VALIDATION_FAILED, result["reason"])
         self.assertEqual([str(task.id)], result["task_ids"])
         self.assertEqual(["Persistida"], result["task_titles"])
+
+    def test_delete_task_result_returns_success_with_shared_contract(self) -> None:
+        task = SimpleNamespace(id=uuid.uuid4(), title="Apagar", user_id="u1", status="pending")
+        fake_db = _FakeDB([task])
+
+        with patch("app.agent.tools.SessionLocal", return_value=fake_db):
+            with patch("app.agent.tools._buscar_tarefas_por_titulo", return_value=[task]):
+                result = delete_task_result("Apagar", "u1")
+
+        self.assertEqual(WRITE_STATUS_SUCCESS, result["status"])
+        self.assertEqual(str(task.id), result["task_id"])
+        self.assertEqual("Apagar", result["task_title"])
+
+    def test_delete_task_result_reports_ambiguity_with_shared_reason(self) -> None:
+        task_a = SimpleNamespace(id=uuid.uuid4(), title="Apagar A", user_id="u1", status="pending")
+        task_b = SimpleNamespace(id=uuid.uuid4(), title="Apagar B", user_id="u1", status="pending")
+        fake_db = _FakeDB([task_a, task_b])
+
+        with patch("app.agent.tools.SessionLocal", return_value=fake_db):
+            with patch("app.agent.tools._buscar_tarefas_por_titulo", return_value=[task_a, task_b]):
+                result = delete_task_result("Apagar", "u1")
+
+        self.assertEqual(WRITE_STATUS_ERROR, result["status"])
+        self.assertEqual(WRITE_REASON_AMBIGUOUS_TASK, result["reason"])
+        self.assertIn("Encontrei mais de uma tarefa", result["message"])
+
+    def test_delete_all_tasks_result_reports_not_confirmed_when_rows_remain(self) -> None:
+        task = SimpleNamespace(id=uuid.uuid4(), title="Persistida", user_id="u1", status="pending")
+        fake_db = _FakeDB([task], persist_after_delete=True)
+
+        with patch("app.agent.tools.SessionLocal", return_value=fake_db):
+            result = delete_all_tasks_result("u1")
+
+        self.assertEqual(WRITE_STATUS_NOT_CONFIRMED, result["status"])
+        self.assertEqual(WRITE_REASON_POST_VALIDATION_FAILED, result["reason"])
+        self.assertEqual([str(task.id)], result["task_ids"])
 
     def test_reschedule_task_result_returns_success_with_shared_contract(self) -> None:
         task = SimpleNamespace(id=uuid.uuid4(), title="Mover", user_id="u1", status="pending", due_date=None)

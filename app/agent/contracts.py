@@ -50,6 +50,7 @@ WRITE_STATUS_INVALID_PERIOD = "invalid_period"
 WRITE_STATUS_NOT_CONFIRMED = "not_confirmed"
 
 WRITE_REASON_TASK_NOT_FOUND = "task_not_found"
+WRITE_REASON_AMBIGUOUS_TASK = "ambiguous_task"
 WRITE_REASON_EXCEPTION = "exception"
 WRITE_REASON_INVALID_PERIOD = "invalid_period"
 WRITE_REASON_INVALID_DUE_DATE = "invalid_due_date"

@@ -26,6 +26,7 @@ from app.agent.contracts import (
     PERIOD_TODAY,
     PERIOD_YESTERDAY,
     VALID_BULK_COMPLETE_PERIODS,
+    WRITE_REASON_AMBIGUOUS_TASK,
     WRITE_REASON_EXCEPTION,
     WRITE_REASON_INVALID_DUE_DATE,
     WRITE_REASON_INVALID_PERIOD,
@@ -1164,6 +1165,10 @@ def complete_task_by_id_result(task_id: str, user_id: str) -> TaskWriteResult:
 
 
 def delete_task(title: str, user_id: str) -> str:
+    return delete_task_result(title, user_id)["message"]
+
+
+def delete_task_result(title: str, user_id: str) -> TaskWriteResult:
     """
     Deleta uma tarefa específica pelo título. Deve ser chamada APENAS após confirmação explícita.
     """
@@ -1171,26 +1176,63 @@ def delete_task(title: str, user_id: str) -> str:
     try:
         tarefas = _buscar_tarefas_por_titulo(db, user_id, title)
         if not tarefas:
-            return f"Nenhuma tarefa pendente encontrada com '{title}'."
+            return _task_write_result(
+                status=WRITE_STATUS_NOT_FOUND,
+                task_title=title,
+                reason=WRITE_REASON_TASK_NOT_FOUND,
+                message=f"Nenhuma tarefa pendente encontrada com '{title}'.",
+            )
         if len(tarefas) > 1:
-            return _mensagem_ambiguidade_tarefas(title, tarefas, "deletar")
+            return _task_write_result(
+                status=WRITE_STATUS_ERROR,
+                task_title=title,
+                reason=WRITE_REASON_AMBIGUOUS_TASK,
+                message=_mensagem_ambiguidade_tarefas(title, tarefas, "deletar"),
+            )
 
         task = tarefas[0]
-
+        task_id = task.id
         titulo = task.title
         db.delete(task)
         db.commit()
-        return f"Tarefa '{titulo}' deletada."
+
+        if str(task_id) in _tarefas_ainda_persistidas(db, [task_id], user_id):
+            return _task_write_result(
+                status=WRITE_STATUS_NOT_CONFIRMED,
+                task_id=task_id,
+                task_title=titulo,
+                reason=WRITE_REASON_POST_VALIDATION_FAILED,
+                message=(
+                    f"Tentei deletar '{titulo}', mas não consegui validar a remoção no sistema. "
+                    "Me pede para listar as pendentes e eu te mostro o estado real."
+                ),
+            )
+
+        return _task_write_result(
+            status=WRITE_STATUS_SUCCESS,
+            task_id=task_id,
+            task_title=titulo,
+            message=f"Tarefa '{titulo}' deletada.",
+        )
 
     except Exception as e:
         db.rollback()
         logger.error(f"[delete_task] {e}")
-        return f"Erro ao deletar tarefa: {str(e)}"
+        return _task_write_result(
+            status=WRITE_STATUS_ERROR,
+            task_title=title,
+            reason=WRITE_REASON_EXCEPTION,
+            message=f"Erro ao deletar tarefa: {str(e)}",
+        )
     finally:
         db.close()
 
 
 def delete_all_tasks(user_id: str, filter_date: str = None) -> str:
+    return delete_all_tasks_result(user_id, filter_date)["message"]
+
+
+def delete_all_tasks_result(user_id: str, filter_date: str = None) -> BulkTaskWriteResult:
     """
     Deleta tarefas pendentes do usuário. Deve ser chamada APENAS após confirmação explícita.
     Se filter_date fornecido, deleta apenas as tarefas daquele dia.
@@ -1218,19 +1260,46 @@ def delete_all_tasks(user_id: str, filter_date: str = None) -> str:
         tasks = query.all()
 
         if not tasks:
-            return "Nenhuma tarefa pendente encontrada para deletar."
+            return _bulk_task_write_result(
+                status=WRITE_STATUS_NOT_FOUND,
+                reason=WRITE_REASON_TASK_NOT_FOUND,
+                message="Nenhuma tarefa pendente encontrada para deletar.",
+            )
 
+        expected_ids = [task.id for task in tasks]
         titulos = [t.title for t in tasks]
         for task in tasks:
             db.delete(task)
         db.commit()
 
-        return f"{len(titulos)} tarefa(s) deletada(s): {', '.join(titulos)}"
+        persisted_ids = _tarefas_ainda_persistidas(db, expected_ids, user_id)
+        if persisted_ids:
+            return _bulk_task_write_result(
+                status=WRITE_STATUS_NOT_CONFIRMED,
+                task_ids=expected_ids,
+                task_titles=titulos,
+                reason=WRITE_REASON_POST_VALIDATION_FAILED,
+                message=(
+                    "Tentei deletar as tarefas selecionadas, mas não consegui validar todas as remoções no sistema. "
+                    "Me pede para listar as pendentes e eu te mostro o estado real."
+                ),
+            )
+
+        return _bulk_task_write_result(
+            status=WRITE_STATUS_SUCCESS,
+            task_ids=expected_ids,
+            task_titles=titulos,
+            message=f"{len(titulos)} tarefa(s) deletada(s): {', '.join(titulos)}",
+        )
 
     except Exception as e:
         db.rollback()
         logger.error(f"[delete_all_tasks] {e}")
-        return f"Erro ao deletar tarefas: {str(e)}"
+        return _bulk_task_write_result(
+            status=WRITE_STATUS_ERROR,
+            reason=WRITE_REASON_EXCEPTION,
+            message=f"Erro ao deletar tarefas: {str(e)}",
+        )
     finally:
         db.close()
 
