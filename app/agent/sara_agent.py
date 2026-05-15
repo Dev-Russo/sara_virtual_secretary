@@ -38,6 +38,7 @@ from app.agent.contracts import (
     PERIOD_TODAY,
     PERIOD_YESTERDAY,
 )
+from app.agent.dates import parse_explicit_or_relative_date, resolve_relative_iso_date
 from app.agent.tools import (
     TOOLS_MAP,
     TOOLS_SCHEMA,
@@ -917,19 +918,11 @@ def _quer_reagendar_backlog(mensagem: str) -> bool:
 def _calcular_data_filtro(mensagem: str) -> str | None:
     from app.agent.tools import hoje_logico
 
-    msg_lower = mensagem.lower().strip()
-    hoje = hoje_logico()
-
-    if re.search(r"\bhoje\b", msg_lower):
-        return hoje.strftime("%Y-%m-%d")
-
-    if re.search(r"\bamanh[aã]\b", msg_lower):
-        return (hoje + timedelta(days=1)).strftime("%Y-%m-%d")
-
-    if re.search(r"\bontem\b", msg_lower):
-        return (hoje - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    return None
+    return resolve_relative_iso_date(
+        mensagem,
+        base_date=hoje_logico(),
+        allow_yesterday=True,
+    )
 
 
 def _parse_data_explicita(mensagem: str, agora: datetime | None = None) -> str | None:
@@ -937,36 +930,7 @@ def _parse_data_explicita(mensagem: str, agora: datetime | None = None) -> str |
         return None
     if agora is None:
         agora = datetime.now(TIMEZONE)
-
-    msg = mensagem.lower().strip()
-    if re.search(r"\bdepois de amanh[aã]\b", msg):
-        return (agora.date() + timedelta(days=2)).strftime("%Y-%m-%d")
-    if re.search(r"\bamanh[aã]\b", msg):
-        return (agora.date() + timedelta(days=1)).strftime("%Y-%m-%d")
-    if re.search(r"\bhoje\b", msg):
-        return agora.date().strftime("%Y-%m-%d")
-
-    match_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", msg)
-    if match_iso:
-        try:
-            return datetime.strptime(match_iso.group(1), "%Y-%m-%d").strftime("%Y-%m-%d")
-        except ValueError:
-            return None
-
-    match_br = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b", msg)
-    if match_br:
-        dia = int(match_br.group(1))
-        mes = int(match_br.group(2))
-        ano = int(match_br.group(3) or agora.year)
-        try:
-            parsed = date(ano, mes, dia)
-            if match_br.group(3) is None and parsed < agora.date():
-                parsed = date(ano + 1, mes, dia)
-            return parsed.strftime("%Y-%m-%d")
-        except ValueError:
-            return None
-
-    return None
+    return parse_explicit_or_relative_date(mensagem, now=agora)
 
 
 def _mensagem_inicio_planejamento(target_date: str) -> str:
