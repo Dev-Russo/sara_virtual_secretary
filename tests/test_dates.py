@@ -1,7 +1,10 @@
 import unittest
 from datetime import date, datetime
 
+import pytz
+
 from app.agent.dates import parse_explicit_or_relative_date, resolve_relative_iso_date
+from app.agent.dates import parse_task_due_date
 
 
 class DateContractsTest(unittest.TestCase):
@@ -46,6 +49,22 @@ class DateContractsTest(unittest.TestCase):
         )
 
         self.assertEqual("2027-01-01", result)
+
+    def test_parse_task_due_date_supports_date_only(self) -> None:
+        parsed, date_only = parse_task_due_date("2026-05-20", timezone=pytz.timezone("America/Sao_Paulo"))
+
+        self.assertEqual("2026-05-20 00:00", parsed.strftime("%Y-%m-%d %H:%M"))
+        self.assertTrue(date_only)
+
+    def test_parse_task_due_date_supports_datetime(self) -> None:
+        parsed, date_only = parse_task_due_date("2026-05-20 10:30", timezone=pytz.timezone("America/Sao_Paulo"))
+
+        self.assertEqual("2026-05-20 10:30", parsed.strftime("%Y-%m-%d %H:%M"))
+        self.assertFalse(date_only)
+
+    def test_parse_task_due_date_rejects_invalid_input(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid_due_date"):
+            parse_task_due_date("amanha cedo", timezone=pytz.timezone("America/Sao_Paulo"))
 
 
 if __name__ == "__main__":

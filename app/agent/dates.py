@@ -1,6 +1,8 @@
 import re
 from datetime import date, datetime, timedelta
 
+import pytz
+
 
 def resolve_relative_iso_date(
     message: str,
@@ -58,3 +60,17 @@ def parse_explicit_or_relative_date(message: str, *, now: datetime) -> str | Non
         return parsed.strftime("%Y-%m-%d")
     except ValueError:
         return None
+
+
+def parse_task_due_date(value: str | None, *, timezone: pytz.BaseTzInfo) -> tuple[datetime | None, bool]:
+    text = str(value or "").strip()
+    if not text:
+        return None, False
+
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return timezone.localize(parsed), fmt == "%Y-%m-%d"
+        except ValueError:
+            continue
+    raise ValueError("invalid_due_date")

@@ -38,6 +38,7 @@ from app.agent.contracts import (
     WRITE_STATUS_NOT_FOUND,
     WRITE_STATUS_SUCCESS,
 )
+from app.agent.dates import parse_task_due_date
 from app.db.database import SessionLocal
 from app.models.task import Task
 from app.models.reminder import Reminder
@@ -355,17 +356,7 @@ def _intervalo_data_local(valor: date) -> tuple[datetime, datetime]:
 
 
 def _parse_due_date_tarefa(valor: str | None) -> tuple[datetime | None, bool]:
-    texto = str(valor or "").strip()
-    if not texto:
-        return None, False
-
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
-        try:
-            parsed = datetime.strptime(texto, fmt)
-            return TIMEZONE.localize(parsed), fmt == "%Y-%m-%d"
-        except ValueError:
-            continue
-    raise ValueError("invalid_due_date")
+    return parse_task_due_date(valor, timezone=TIMEZONE)
 
 
 def _periodo_para_intervalo(
