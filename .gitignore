@@ -44,5 +44,4 @@ PROJETO_SARA.md
 .gsd/
 .agents/
 
-# Local technical-debt tracking
-.techdebt/
+.AGENTS.md
